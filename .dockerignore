@@ -1,0 +1,17 @@
+.git
+.gitignore
+.venv
+.mimosa
+.pytest_cache
+.ruff_cache
+__pycache__
+*.pyc
+.env
+logs
+backups
+.scratch
+scripts
+tests
+docs
+*.md
+docker-compose*.yml

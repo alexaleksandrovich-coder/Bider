@@ -1,0 +1,10 @@
+# Production overlay. Use together with the base file:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# TLS is terminated OUTSIDE compose (Caddy/nginx in front of 127.0.0.1:8000,
+# see docs/ru/deploy-vps.md). This overlay only turns on the read-only
+# collector loops — the one difference from a local rehearsal.
+services:
+  app:
+    environment:
+      BIDER_RUN_COLLECTOR: "true"
