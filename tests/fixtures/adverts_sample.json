@@ -1,0 +1,42 @@
+[
+  {
+    "advertId": 1001,
+    "name": "Поиск-1",
+    "type": 8,
+    "status": 9,
+    "paymentType": "cpm",
+    "bidType": "manual",
+    "changeTime": "2026-10-09T12:30:00+03:00",
+    "settings": {
+      "placements": {"search": true, "recommendations": false}
+    },
+    "nmSettings": [
+      {"nmID": 111, "bidsKopecks": {"search": 25000}}
+    ]
+  },
+  {
+    "advertId": 1002,
+    "name": "Unified-2",
+    "type": 8,
+    "status": 9,
+    "paymentType": "cpc",
+    "bidType": "unified",
+    "changeTime": null,
+    "settings": {"placements": {}},
+    "nmSettings": [
+      {"nmID": 222, "bidsKopecks": {"combined": 900}}
+    ]
+  },
+  {
+    "advertId": 1003,
+    "name": "Оба-3",
+    "type": 8,
+    "status": 11,
+    "paymentType": "cpm",
+    "bidType": "manual",
+    "placements": {"search": true, "recommendations": true},
+    "nmSettings": [
+      {"nmID": 333, "bidsKopecks": {"search": 21000, "recommendations": 15000}}
+    ]
+  }
+]

@@ -1,0 +1,72 @@
+[
+  {
+    "advertId": 1,
+    "days": [
+      {
+        "date": "2026-10-10",
+        "appType": "web",
+        "views": 60,
+        "clicks": 3,
+        "atbs": 1,
+        "orders": 1,
+        "shks": 0,
+        "sum_price": 30000,
+        "sum": 1500,
+        "canceled": 0,
+        "nms": [
+          {"nmID": 111, "views": 60, "clicks": 3, "atbs": 1, "orders": 1, "shks": 0, "sum_price": 30000, "sum": 1500, "canceled": 0}
+        ]
+      },
+      {
+        "date": "2026-10-10",
+        "appType": "web",
+        "views": 40,
+        "clicks": 2,
+        "atbs": 1,
+        "orders": 0,
+        "shks": 1,
+        "sum_price": 20000,
+        "sum": 1000,
+        "canceled": 0,
+        "nms": [
+          {"nmID": 111, "views": 40, "clicks": 2, "atbs": 1, "orders": 0, "shks": 1, "sum_price": 20000, "sum": 1000, "canceled": 0}
+        ]
+      },
+      {
+        "date": "2026-10-10",
+        "appType": "android",
+        "views": 50,
+        "clicks": 2,
+        "atbs": 1,
+        "orders": 1,
+        "shks": 0,
+        "sum_price": 30000,
+        "sum": 1500,
+        "canceled": 0,
+        "nms": [
+          {"nmID": 111, "views": 50, "clicks": 2, "atbs": 1, "orders": 1, "shks": 0, "sum_price": 30000, "sum": 1500, "canceled": 0}
+        ]
+      },
+      {
+        "date": "2026-10-11",
+        "appType": "web",
+        "views": 80,
+        "clicks": 4,
+        "atbs": 3,
+        "orders": 2,
+        "shks": 2,
+        "sum_price": 40000,
+        "sum": 2000,
+        "canceled": 1,
+        "nms": [
+          {"nmID": 111, "views": 80, "clicks": 4, "atbs": 3, "orders": 2, "shks": 2, "sum_price": 40000, "sum": 2000, "canceled": 1},
+          {"nmID": 222, "views": 30, "clicks": 1, "atbs": 1, "orders": 1, "shks": 1, "sum_price": 10000, "sum": 800, "canceled": 0}
+        ]
+      }
+    ],
+    "boosterStats": [
+      {"nm": 111, "date": "2026-10-10", "avg_position": 3.4},
+      {"nm": 222, "date": "2026-10-10", "avg_position": 5.7}
+    ]
+  }
+]
