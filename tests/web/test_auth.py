@@ -90,7 +90,8 @@ def test_login_wrong_password_shows_error_without_cookie(client):
     s = get_settings()
     r = client.post(
         "/login",
-        data={"username": s.admin_username, "password": "definitely-wrong"},
+        # производный пароль, не литерал: тест проверяет отказ, а не хранит креды
+        data={"username": s.admin_username, "password": s.admin_password + "-wrong"},
         follow_redirects=False,
     )
     assert r.status_code == 303
