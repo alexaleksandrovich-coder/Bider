@@ -119,6 +119,28 @@ def test_overview_fresh_cabinet_has_no_stale_marker(auth_client, cabinet_ids):
     assert "stale" not in r.text
 
 
+def test_overview_never_collected_cabinet_explains_when_to_expect_data(
+    auth_client, cabinet_ids
+):
+    """A cabinet without any collection_log row points to the manual sync."""
+    cabinet_ids.append(_seed(make_cabinet(name="T8 Never")))
+    r = auth_client.get("/")
+    assert r.status_code == 200
+    assert "данные появятся после первого сбора" in r.text
+    assert "Обновить сейчас" in r.text
+    assert 'href="/admin/cabinets"' in r.text
+    # a cabinet WITH log rows keeps the ordinary relative-time freshness
+    cabinet_ids.append(
+        _seed(
+            make_cabinet(name="T8 Collected"),
+            make_collection_log(None, finished_at=_T0 - timedelta(minutes=2)),
+        )
+    )
+    r = auth_client.get("/")
+    assert r.text.count("данные появятся после первого сбора") == 1
+    assert "T8 Collected" in r.text
+
+
 # --- GET /cabinets/{id} ------------------------------------------------------
 
 
@@ -206,7 +228,7 @@ def test_admin_cabinets_post_creates_encrypted_cabinet(auth_client, cabinet_ids)
         follow_redirects=False,
     )
     assert r.status_code == 303
-    assert r.headers["location"] == "/admin/cabinets"
+    assert r.headers["location"].startswith("/admin/cabinets?added=")
 
     async def _load(db):
         return (

@@ -13,7 +13,11 @@
       <span class="badge">{{ c.wb_type }}</span>
     </header>
     <p class="muted">Валюта: {{ c.currency }} · данные:
+      {% if row.never_collected %}
+      <span class="freshness stale">данные появятся после первого сбора — кнопка «Обновить сейчас» в разделе <a href="/admin/cabinets">Кабинеты</a></span>
+      {% else %}
       <span class="freshness{% if row.stale %} stale{% endif %}">{{ rel_time(row.freshness) }}</span>
+      {% endif %}
     </p>
     <table class="money">
       <tr><th>Расход сегодня</th><td class="num">{{ format_money(row.spent_today, c.currency) }}</td></tr>
@@ -24,4 +28,5 @@
   </section>
   {% endfor %}
 </div>
+<p class="muted phase-note">Сейчас работает фаза 1 — сбор и мониторинг (только чтение). Настройки биддера (ставки, расписания, минус-фразы) появятся в следующей фазе после сверки данных.</p>
 {% endblock %}

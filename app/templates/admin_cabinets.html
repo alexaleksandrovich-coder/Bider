@@ -3,6 +3,16 @@
 {% block content %}
 <h1>Кабинеты</h1>
 
+{% if added %}
+<p class="badge loop-ok added-banner">Кабинет "{{ added }}" добавлен. Первый сбор — нажмите «Обновить сейчас» или подождите до 5 минут.</p>
+{% endif %}
+{% if synced %}
+<p class="badge loop-ok">Данные обновлены — ниже свежие статусы сбора.</p>
+{% endif %}
+{% if replaced %}
+<p class="badge loop-ok">Токен заменён. Циклы сбора перезапустятся автоматически в течение минуты.</p>
+{% endif %}
+
 <section class="card">
   <h2>Добавить кабинет</h2>
   {% if error %}<p class="error">{{ error }}</p>{% endif %}
@@ -18,26 +28,59 @@
     <textarea id="token" name="token" rows="3" required></textarea>
     <button type="submit">Добавить</button>
   </form>
+  <details class="token-hint">
+    <summary>Какой токен нужен?</summary>
+    <p class="muted">В кабинете WB: Настройки → Доступ к API → Создать токен.
+    Тип — Персональный. Категории: Продвижение (обязательно), Аналитика,
+    Статистика. Уровень — Чтение и запись. Токен показывается один раз —
+    сразу сохраните его.</p>
+  </details>
 </section>
 
 <section class="card">
   <h2>Подключённые кабинеты</h2>
   <table>
-    <thead><tr><th>Имя</th><th>Тип</th><th>Валюта</th><th>Активен</th></tr></thead>
+    <thead><tr><th>Имя</th><th>Тип</th><th>Последний успешный сбор</th><th>Последний прогон</th><th>Действия</th></tr></thead>
     <tbody>
       {% for c in cabinets %}
+      {% set st = collection.get(c.id, {}) %}
       <tr>
         <td>{{ c.name }}</td>
-        <td>{{ c.wb_type }}</td>
-        <td>{{ c.currency }}</td>
-        <td>{{ "да" if c.active else "нет" }}</td>
+        <td><span class="badge">{{ c.wb_type }}</span> {{ c.currency }} · {{ "активен" if c.active else "выключен" }}</td>
+        <td>{{ rel_time(st.last_ok) }}</td>
+        <td>
+          {% if st.last_status %}
+          <span class="badge loop-{{ st.last_status }}">{{ st.last_status_label }}</span>
+          {% else %}ещё не запускался{% endif %}
+        </td>
+        <td class="actions">
+          <form method="post" action="/admin/cabinets/{{ c.id }}/sync" class="inline">
+            <button type="submit">Обновить сейчас</button>
+          </form>
+          <details class="token-replace">
+            <summary>Заменить токен</summary>
+            <form method="post" action="/admin/cabinets/{{ c.id }}/token" class="admin-form">
+              <label for="token-{{ c.id }}">Новый API-токен</label>
+              <textarea id="token-{{ c.id }}" name="token" rows="3" required></textarea>
+              <label for="rename-{{ c.id }}">Новое название (необязательно)</label>
+              <input id="rename-{{ c.id }}" name="name" type="text">
+              <button type="submit">Сохранить</button>
+            </form>
+          </details>
+          <form method="post" action="/admin/cabinets/{{ c.id }}/delete" class="inline"
+                onsubmit="return confirm('Удалить кабинет и все его данные?')">
+            <button type="submit">Удалить</button>
+          </form>
+        </td>
       </tr>
       {% endfor %}
       {% if not cabinets %}
-      <tr><td colspan="4">Пока нет кабинетов.</td></tr>
+      <tr><td colspan="5">Пока нет кабинетов.</td></tr>
       {% endif %}
     </tbody>
   </table>
-  <p class="muted">Токены хранятся зашифрованными и не показываются.</p>
+  <p class="muted">Токены хранятся зашифрованными и не показываются. Замена токена или новый кабинет подхватываются сборщиком автоматически (до минуты).</p>
 </section>
+
+<p class="muted phase-note">Сейчас работает фаза 1 — сбор и мониторинг (только чтение). Настройки биддера (ставки, расписания, минус-фразы) появятся в следующей фазе после сверки данных.</p>
 {% endblock %}

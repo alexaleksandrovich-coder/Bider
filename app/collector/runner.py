@@ -11,6 +11,7 @@ formats marked NOT confirmed are stored raw and parsed defensively — see
 """
 
 import asyncio
+import hashlib
 import logging
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -20,7 +21,7 @@ from typing import Any
 from sqlalchemy import delete, insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.collector.loops import IntervalLoop
+from app.collector.loops import IntervalLoop, Sleep
 from app.collector.windows import next_window
 from app.config import get_settings
 from app.crypto import decrypt_token
@@ -405,6 +406,65 @@ async def _last_fullstats_success(
     return result.scalar_one_or_none()
 
 
+# -- one-off manual sync (the admin page's "Обновить сейчас" button) ----------
+
+_SYNC_STEPS: tuple[tuple[str, Callable[[WbClient, AsyncSession, int], Any]], ...] = (
+    ("campaigns", collect_campaigns),
+    ("budgets", collect_budgets),
+    ("balance", collect_balance),
+    ("fullstats", collect_fullstats),
+)
+
+_DETAIL_MAX_LEN = 200
+
+
+async def sync_cabinet_once(cabinet_id: int) -> dict[str, int | str]:
+    """One synchronous read-only collection pass over a cabinet (manual refresh).
+
+    Runs campaigns, budgets, balance and fullstats in order, each in its own
+    session and its own try/except WbApiError: a failed step becomes the string
+    status "ошибка: <detail>" and the remaining steps still run. Every step
+    appends a collection_log row (the same bookkeeping IntervalLoop does for
+    the background loops) so the admin page's freshness reflects manual syncs
+    too. Raises ValueError when the cabinet does not exist.
+    """
+    async with SessionLocal() as session:
+        cabinet = await session.get(Cabinet, cabinet_id)
+    if cabinet is None:
+        raise ValueError(f"cabinet {cabinet_id} not found")
+
+    client = WbClient(
+        decrypt_token(cabinet.token_encrypted),
+        LimiterRegistry(),
+        cabinet_id=cabinet_id,
+    )
+    result: dict[str, int | str] = {}
+    try:
+        for name, collect in _SYNC_STEPS:
+            started_at = _now_utc()
+            try:
+                async with SessionLocal() as session:
+                    processed = await collect(client, session, cabinet_id)
+            except WbApiError as exc:
+                detail = str(exc)[:_DETAIL_MAX_LEN]
+                result[name] = f"ошибка: {detail}"
+                async with SessionLocal() as session:
+                    await log_collection(
+                        session, cabinet_id, name, "error", detail,
+                        started_at, _now_utc(),
+                    )
+            else:
+                result[name] = processed
+                async with SessionLocal() as session:
+                    await log_collection(
+                        session, cabinet_id, name, "ok", f"processed={processed}",
+                        started_at, _now_utc(),
+                    )
+    finally:
+        await client.aclose()
+    return result
+
+
 # -- loop assembly -----------------------------------------------------------
 
 
@@ -443,6 +503,13 @@ _COLLECTORS: dict[str, Callable[[WbClient, AsyncSession, int], Any]] = {
 _tasks: list[asyncio.Task] = []
 _clients: list[WbClient] = []
 
+# supervisor state: per-cabinet loop entries (task, loop, token fingerprint)
+# plus the one client all of a cabinet's loops share. The fingerprint is
+# sha256 of token_encrypted — a token change is detected WITHOUT decrypting.
+_running: dict[int, list[tuple[asyncio.Task, IntervalLoop, str]]] = {}
+_cabinet_clients: dict[int, WbClient] = {}
+_supervisor_task: asyncio.Task | None = None
+
 
 def _bind_collect(
     client: WbClient,
@@ -468,9 +535,121 @@ def _bind_cleanup() -> Callable[[], Any]:
     return fn
 
 
+def _token_fingerprint(token_encrypted: str) -> str:
+    """sha256 of the ENCRYPTED token: detects a token change without decrypting."""
+    return hashlib.sha256(token_encrypted.encode()).hexdigest()
+
+
+async def start_for_cabinet(cabinet: Cabinet) -> list[IntervalLoop]:
+    """Build and start the LOOPS_SPEC collection loops for one cabinet.
+
+    Registers the loop tasks in _running (keyed by cabinet id, each entry
+    carrying the token fingerprint) and the shared client in _cabinet_clients.
+    """
+    fingerprint = _token_fingerprint(cabinet.token_encrypted)
+    client = WbClient(
+        decrypt_token(cabinet.token_encrypted),
+        LimiterRegistry(),
+        cabinet_id=cabinet.id,
+    )
+    _cabinet_clients[cabinet.id] = client
+    loops: list[IntervalLoop] = []
+    entries: list[tuple[asyncio.Task, IntervalLoop, str]] = []
+    for spec in LOOPS_SPEC:
+        loop = IntervalLoop(
+            spec.name,
+            cabinet.id,
+            spec.period_sec,
+            _bind_collect(client, cabinet.id, _COLLECTORS[spec.name]),
+        )
+        loops.append(loop)
+        task = asyncio.create_task(
+            loop.run_forever(), name=f"collector:{spec.name}:{cabinet.id}"
+        )
+        entries.append((task, loop, fingerprint))
+    _running[cabinet.id] = entries
+    logger.info(
+        "collector: started %d loops for cabinet %d (%s)",
+        len(loops), cabinet.id, cabinet.name,
+    )
+    return loops
+
+
+async def stop_for_cabinet(cabinet_id: int) -> None:
+    """Cancel one cabinet's loop tasks and close its client; no-op if not running."""
+    entries = _running.pop(cabinet_id, None)
+    client = _cabinet_clients.pop(cabinet_id, None)
+    if not entries and client is None:
+        return
+    tasks = [task for task, _loop, _fp in entries or []]
+    for task, loop, _fp in entries or []:
+        loop.stopped = True
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    if client is not None:
+        await client.aclose()
+    logger.info("collector: stopped cabinet %d (%d loops)", cabinet_id, len(entries or ()))
+
+
+async def supervisor_tick() -> int:
+    """Reconcile the running loops with the cabinets table; return the change count.
+
+    A cabinet deleted or deactivated since the last tick gets its loops stopped;
+    a new (or re-activated) cabinet gets loops started; a changed token
+    (different ciphertext fingerprint) restarts the cabinet's loops so the new
+    token is used without waiting for a process restart.
+    """
+    async with SessionLocal() as session:
+        cabinets = (await session.execute(select(Cabinet))).scalars().all()
+    active = {cabinet.id: cabinet for cabinet in cabinets if cabinet.active}
+
+    changes = 0
+    for cabinet_id in list(_running):
+        if cabinet_id not in active:
+            await stop_for_cabinet(cabinet_id)
+            changes += 1
+    for cabinet_id, cabinet in active.items():
+        fingerprint = _token_fingerprint(cabinet.token_encrypted)
+        entries = _running.get(cabinet_id)
+        if entries is not None and all(fp == fingerprint for _, _, fp in entries):
+            continue  # already running with the current token
+        if entries is not None:  # token changed: restart with the new token
+            await stop_for_cabinet(cabinet_id)
+        try:
+            await start_for_cabinet(cabinet)
+        except ValueError as exc:  # undecryptable token, e.g. the Fernet key rotated
+            logger.error(
+                "supervisor: cabinet %d (%s) skipped, %s — "
+                "замените токен на /admin/cabinets (Заменить токен)",
+                cabinet_id, cabinet.name, exc,
+            )
+            changes += 1
+            continue
+        changes += 1
+    if changes:
+        logger.info("supervisor: %d cabinet change(s)", changes)
+    return changes
+
+
+async def supervisor_forever(*, sleep: Sleep = asyncio.sleep, period_sec: int = 60) -> None:
+    """supervisor_tick every period_sec; the first tick runs immediately.
+
+    A failing tick (e.g. a DB blip) is logged and retried on the next period —
+    the supervisor must outlive transient errors.
+    """
+    while True:
+        try:
+            await supervisor_tick()
+        except Exception:
+            logger.exception("supervisor tick failed")
+        await sleep(period_sec)
+
+
 async def start_all() -> list[IntervalLoop]:
     """Build and start one IntervalLoop per (active cabinet x LOOPS_SPEC) plus
-    the cabinetless nightly raw_responses cleaner. Returns the loop list."""
+    the cabinetless nightly raw_responses cleaner and the cabinet supervisor
+    (picks up cabinets added after startup). Returns the loop list."""
     loops: list[IntervalLoop] = []
     async with SessionLocal() as session:
         cabinets = (
@@ -479,41 +658,35 @@ async def start_all() -> list[IntervalLoop]:
             .all()
         )
     for cabinet in cabinets:
-        client = WbClient(
-            decrypt_token(cabinet.token_encrypted),
-            LimiterRegistry(),
-            cabinet_id=cabinet.id,
-        )
-        _clients.append(client)
-        for spec in LOOPS_SPEC:
-            loop = IntervalLoop(
-                spec.name,
-                cabinet.id,
-                spec.period_sec,
-                _bind_collect(client, cabinet.id, _COLLECTORS[spec.name]),
-            )
-            loops.append(loop)
+        loops.extend(await start_for_cabinet(cabinet))
     loops.append(IntervalLoop(_CLEANUP_NAME, None, _CLEANUP_PERIOD_SEC, _bind_cleanup()))
-    for loop in loops:
-        _tasks.append(
-            asyncio.create_task(
-                loop.run_forever(), name=f"collector:{loop.name}:{loop.cabinet_id}"
-            )
-        )
-    logger.info("collector started: %d loops for %d cabinets", len(loops), len(cabinets))
+    _tasks.append(
+        asyncio.create_task(loops[-1].run_forever(), name="collector:cleanup")
+    )
+    global _supervisor_task
+    _supervisor_task = asyncio.create_task(supervisor_forever(), name="collector:supervisor")
+    logger.info(
+        "collector started: %d loops for %d cabinets + supervisor", len(loops), len(cabinets)
+    )
     return loops
 
 
 async def stop_all(loops: list[IntervalLoop]) -> None:
-    """Cancel all collector tasks (started by start_all) and close clients."""
+    """Cancel all collector tasks (loops, cleaner, supervisor) and close clients."""
     for loop in loops:
         loop.stopped = True
+    global _supervisor_task
+    supervisor, _supervisor_task = _supervisor_task, None
     tasks = list(_tasks)
     _tasks.clear()
+    if supervisor is not None:
+        tasks.append(supervisor)
     for task in tasks:
         task.cancel()
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
+    for cabinet_id in list(_running):
+        await stop_for_cabinet(cabinet_id)
     clients = list(_clients)
     _clients.clear()
     for client in clients:
