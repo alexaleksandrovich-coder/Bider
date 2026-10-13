@@ -8,25 +8,23 @@ from typing import Annotated
 from fastapi import Depends, FastAPI, Form, Request
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db import SessionLocal, dispose_engine
-from app.models import User
 from app.web.auth import (
     COOKIE_NAME,
     get_db,
     login_user,
     logout_user,
-    require_user,
     seed_admin,
 )
+from app.web.pages import router as pages_router
+from app.web.pages import templates
 
 VERSION = "0.1.0"
 
 _BASE_DIR = Path(__file__).resolve().parent
-templates = Jinja2Templates(directory=str(_BASE_DIR / "templates"))
 
 
 def create_app() -> FastAPI:
@@ -82,12 +80,7 @@ def create_app() -> FastAPI:
         response.delete_cookie(COOKIE_NAME)
         return response
 
-    # Placeholder for Task 8 (dashboard overview); auth-protected.
-    @app.get("/")
-    async def overview(
-        request: Request,
-        user: Annotated[User, Depends(require_user)],
-    ):
-        return templates.TemplateResponse(request, "overview.html", {"user": user})
+    # Dashboard pages (Task 8): overview, cabinet campaigns, admin cabinets.
+    app.include_router(pages_router)
 
     return app

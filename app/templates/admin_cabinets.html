@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Кабинеты — Bider{% endblock %}
+{% block content %}
+<h1>Кабинеты</h1>
+
+<section class="card">
+  <h2>Добавить кабинет</h2>
+  {% if error %}<p class="error">{{ error }}</p>{% endif %}
+  <form method="post" action="/admin/cabinets" class="admin-form">
+    <label for="name">Название</label>
+    <input id="name" name="name" type="text" required>
+    <label for="wb_type">Тип кабинета</label>
+    <select id="wb_type" name="wb_type">
+      <option value="BY">BY — Беларусь (BYN)</option>
+      <option value="RU">RU — Россия (RUB)</option>
+    </select>
+    <label for="token">API-токен (Personal, доступ «Продвижение»)</label>
+    <textarea id="token" name="token" rows="3" required></textarea>
+    <button type="submit">Добавить</button>
+  </form>
+</section>
+
+<section class="card">
+  <h2>Подключённые кабинеты</h2>
+  <table>
+    <thead><tr><th>Имя</th><th>Тип</th><th>Валюта</th><th>Активен</th></tr></thead>
+    <tbody>
+      {% for c in cabinets %}
+      <tr>
+        <td>{{ c.name }}</td>
+        <td>{{ c.wb_type }}</td>
+        <td>{{ c.currency }}</td>
+        <td>{{ "да" if c.active else "нет" }}</td>
+      </tr>
+      {% endfor %}
+      {% if not cabinets %}
+      <tr><td colspan="4">Пока нет кабинетов.</td></tr>
+      {% endif %}
+    </tbody>
+  </table>
+  <p class="muted">Токены хранятся зашифрованными и не показываются.</p>
+</section>
+{% endblock %}

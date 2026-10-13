@@ -46,3 +46,16 @@ def client(web_schema: None):
 
     with TestClient(create_app()) as test_client:
         yield test_client
+
+
+@pytest.fixture
+def auth_client(client):
+    """TestClient logged in as the seeded admin (Settings credentials)."""
+    from app.config import get_settings
+
+    settings = get_settings()
+    response = client.post(
+        "/login", data={"username": settings.admin_username, "password": settings.admin_password}
+    )
+    assert response.status_code == 200  # followed the 303 to "/"
+    return client

@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}{{ cabinet.name }} — Bider{% endblock %}
+{% block content %}
+<h1>{{ cabinet.name }} <span class="badge">{{ cabinet.wb_type }}</span></h1>
+<p class="muted">Валюта: {{ cabinet.currency }}</p>
+
+<nav class="filters">
+  <a href="/cabinets/{{ cabinet.id }}"{% if status is none %} class="filter-on"{% endif %}>Все</a>
+  {% for key, label in filter_links %}
+  <a href="/cabinets/{{ cabinet.id }}?status={{ key }}"{% if status == key %} class="filter-on"{% endif %}>{{ label }}</a>
+  {% endfor %}
+</nav>
+
+<table>
+  <thead>
+    <tr>
+      <th>Advert ID</th>
+      <th>Кампания</th>
+      <th>Тип</th>
+      <th>Статус</th>
+      <th>Оплата</th>
+      <th>Модель ставки</th>
+      <th>Ставка: поиск</th>
+      <th>Ставка: рекомендации</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for camp in campaigns %}
+    <tr>
+      <td>{{ camp.advert_id }}</td>
+      <td><a href="/cabinets/{{ cabinet.id }}/campaigns/{{ camp.advert_id }}">{{ camp.name }}</a></td>
+      <td>{{ type_name(camp.type) }}</td>
+      <td><span class="badge status-{{ camp.status }}">{{ status_name(camp.status) }}</span></td>
+      <td>{{ camp.payment_type }}</td>
+      <td>{{ camp.bid_type }}</td>
+      <td class="num">{% if camp.placement_search and camp.bid_search is not none %}{{ format_money(camp.bid_search, cabinet.currency) }}{% else %}—{% endif %}</td>
+      <td class="num">{% if camp.placement_reco and camp.bid_reco is not none %}{{ format_money(camp.bid_reco, cabinet.currency) }}{% else %}—{% endif %}</td>
+    </tr>
+    {% endfor %}
+    {% if not campaigns %}
+    <tr><td colspan="8">РК не найдены.</td></tr>
+    {% endif %}
+  </tbody>
+</table>
+{% endblock %}

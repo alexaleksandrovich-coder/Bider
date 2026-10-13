@@ -131,3 +131,107 @@ button:hover {
   color: var(--danger);
   margin: 0.4rem 0;
 }
+
+/* overview cards */
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 1rem;
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1rem 1.2rem;
+}
+
+.card h2 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.card a {
+  color: var(--text);
+  text-decoration: none;
+}
+
+.card a:hover {
+  color: var(--accent);
+}
+
+.card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.badge {
+  display: inline-block;
+  padding: 0.05rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 0.8rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+/* freshness alarm: collection data missing or older than 15 min */
+.card.stale {
+  border-color: var(--danger);
+}
+
+.stale {
+  color: var(--danger);
+}
+
+.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* campaign status filter links */
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.9rem;
+  margin: 0.6rem 0;
+}
+
+.filters a {
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.filters a.filter-on {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* admin cabinets form */
+.admin-form label {
+  display: block;
+  margin: 0.8rem 0 0.25rem;
+  color: var(--muted);
+}
+
+.admin-form input,
+.admin-form select,
+.admin-form textarea {
+  width: 100%;
+  padding: 0.5rem 0.6rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+
+.admin-form button {
+  margin-top: 1rem;
+}

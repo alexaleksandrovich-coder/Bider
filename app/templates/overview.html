@@ -2,5 +2,26 @@
 {% block title %}Обзор — Bider{% endblock %}
 {% block content %}
 <h1>Обзор</h1>
-<p>Bider — дашборд (Task 8). Обзор кабинетов, расходов и балансов появится здесь.</p>
+{% if not rows %}
+<p>Нет активных кабинетов. Добавьте их на странице <a href="/admin/cabinets">Кабинеты</a>.</p>
+{% endif %}
+<div class="cards">
+  {% for row in rows %}{% set c = row.cabinet %}
+  <section class="card cabinet-card{% if row.stale %} stale{% endif %}">
+    <header class="card-head">
+      <h2><a href="/cabinets/{{ c.id }}">{{ c.name }}</a></h2>
+      <span class="badge">{{ c.wb_type }}</span>
+    </header>
+    <p class="muted">Валюта: {{ c.currency }} · данные:
+      <span class="freshness{% if row.stale %} stale{% endif %}">{{ rel_time(row.freshness) }}</span>
+    </p>
+    <table class="money">
+      <tr><th>Расход сегодня</th><td class="num">{{ format_money(row.spent_today, c.currency) }}</td></tr>
+      <tr><th>Расход 7 дней</th><td class="num">{{ format_money(row.spent_7d, c.currency) }}</td></tr>
+      <tr><th>Расход 30 дней</th><td class="num">{{ format_money(row.spent_30d, c.currency) }}</td></tr>
+      <tr><th>Баланс</th><td class="num">{% if row.balance is none %}нет данных{% else %}{{ format_money(row.balance, c.currency) }}{% endif %}</td></tr>
+    </table>
+  </section>
+  {% endfor %}
+</div>
 {% endblock %}

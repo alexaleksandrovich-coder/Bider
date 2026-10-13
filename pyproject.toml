@@ -15,6 +15,7 @@ dependencies = [
     "httpx",
     "cryptography",
     "pydantic-settings",
+    "tzdata",  # IANA tz database for zoneinfo on Windows / slim images
 ]
 
 [dependency-groups]
