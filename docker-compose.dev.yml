@@ -1,0 +1,24 @@
+# Dev infrastructure only: the app itself runs on the host (venv/uvicorn),
+# so it reaches Postgres via localhost:5436. When deploying, service names
+# resolve inside the compose network instead of host ports.
+name: bider-dev
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: bider
+    ports:
+      - "5436:5432" # 5432-5435 on the host are taken by other projects
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d bider"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
