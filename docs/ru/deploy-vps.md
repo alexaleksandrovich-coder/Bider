@@ -35,6 +35,35 @@ docker compose logs -f app   # дождитесь строки про Uvicorn ru
 
 В prod-оверлее включён `BIDER_RUN_COLLECTOR=true` — фоновые read-only циклы сбора стартуют вместе с приложением.
 
+> **Если рядом живёт общий Caddy в docker (как на robotay.ru):** контейнеру приложения нужно попасть в сеть прокси. Создайте `docker-compose.override.yml` рядом с compose-файлами (в репо не коммитится — имя сети сервероспецифично):
+>
+> ```yaml
+> services:
+>   app:
+>     networks:
+>       default: {}
+>       <сеть-caddy>:
+>         aliases: [bider]
+> networks:
+>   <сеть-caddy>:
+>     external: true
+> ```
+>
+> и **всегда указывайте все три файла явно** — при явных `-f` compose не подхватывает override автоматически:
+>
+> ```bash
+> docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.override.yml up -d --build
+> ```
+>
+> Тогда Caddy-блок выглядит так (контейнер доступен по алиасу `bider`):
+>
+> ```
+> bider.robotay.ru {
+>     import service_tls
+>     reverse_proxy bider:8000
+> }
+> ```
+
 ## 3. Поддомен и TLS (Caddy)
 
 ```bash
