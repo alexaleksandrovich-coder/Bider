@@ -1,0 +1,521 @@
+"""Collector jobs: one collect_* function per loop + loop assembly (start_all).
+
+Every collect_* takes (client, session, cabinet_id), performs ONLY read calls
+on the WB client, writes through app.repos (each call commits) and returns
+the number of processed rows for collection_log detail.
+
+Raw responses: every endpoint hit is journaled into raw_responses via
+save_raw (retention = Settings.raw_log_days; 0 disables writing). Response
+formats marked NOT confirmed are stored raw and parsed defensively — see
+.scratch/facts.md (the spike got 403 everywhere).
+"""
+
+import asyncio
+import logging
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta, timezone
+from typing import Any
+
+from sqlalchemy import delete, insert, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.collector.loops import IntervalLoop
+from app.collector.windows import next_window
+from app.config import get_settings
+from app.crypto import decrypt_token
+from app.db import SessionLocal
+from app.models import BidHistory, Cabinet, Campaign, CollectionLog, RawResponse
+from app.repos import (
+    append_bids,
+    insert_balance,
+    insert_budgets,
+    insert_snapshot,
+    log_collection,
+    upsert_campaigns,
+    upsert_clusters,
+    upsert_positions,
+    upsert_stats,
+)
+from app.wb.client import WbClient
+from app.wb.errors import WbApiError
+from app.wb.limiter import LimiterRegistry
+from app.wb.parsers import get_any, parse_adverts, parse_budget, parse_fullstats
+
+logger = logging.getLogger(__name__)
+
+_MSK = timezone(timedelta(hours=3))  # stat dates are Moscow-calendar days
+_MAX_BATCH_IDS = 50  # WB adverts/budget accept <= 50 ids per request
+_ACTIVE_STATUSES = (9, 11)  # WB campaign statuses considered running
+
+# Raw-response endpoint labels (same strings as the client's paths).
+_ENDPOINT_COUNT = "/adv/v1/promotion/count"
+_ENDPOINT_ADVERTS = "/api/advert/v2/adverts"
+_ENDPOINT_BUDGET = "/api/advert/v2/budget"
+_ENDPOINT_BALANCE = "/adv/v1/balance"
+_ENDPOINT_FULLSTATS = "/adv/v3/fullstats"
+_ENDPOINT_BIDS_MIN = "/api/advert/v1/bids/min"
+_ENDPOINT_RECOMMENDATIONS = "/api/advert/v0/bids/recommendations"
+_ENDPOINT_NORMQUERY_LIST = "/adv/v0/normquery/list"
+_ENDPOINT_NORMQUERY_STATS = "/adv/v1/normquery/stats"
+
+
+def _now_utc() -> datetime:
+    return datetime.now(UTC)
+
+
+def _chunked(items: list[int], size: int) -> Iterator[list[int]]:
+    for start in range(0, len(items), size):
+        yield items[start : start + size]
+
+
+async def save_raw(
+    session: AsyncSession, cabinet_id: int, endpoint: str, status: int, payload: Any
+) -> None:
+    """Journal one raw API response (own insert+commit); raw_log_days=0 disables."""
+    if get_settings().raw_log_days <= 0:
+        return
+    await session.execute(
+        insert(RawResponse).values(
+            cabinet_id=cabinet_id,
+            endpoint=endpoint,
+            status=status,
+            payload=payload,
+            captured_at=_now_utc(),
+        )
+    )
+    await session.commit()
+
+
+# -- collection jobs ---------------------------------------------------------
+
+
+async def collect_campaigns(client: WbClient, session: AsyncSession, cabinet_id: int) -> int:
+    """promotion/count -> ALL advert ids (every status) -> adverts in <=50 batches."""
+    count_payload = await client.promotion_count()
+    await save_raw(session, cabinet_id, _ENDPOINT_COUNT, 200, count_payload)
+    # NB: all statuses, not only active — pauses/finishings must stay visible.
+    advert_ids = _advert_ids_from_count(count_payload)
+
+    rows: list[dict] = []
+    for chunk in _chunked(advert_ids, _MAX_BATCH_IDS):
+        payload = await client.adverts(chunk)
+        await save_raw(session, cabinet_id, _ENDPOINT_ADVERTS, 200, payload)
+        rows.extend(parse_adverts(payload))
+
+    await upsert_campaigns(session, cabinet_id, rows)
+    await append_bids(session, cabinet_id, rows, captured_at=_now_utc())
+    return len(rows)
+
+
+async def collect_budgets(client: WbClient, session: AsyncSession, cabinet_id: int) -> int:
+    """Budgets of active campaigns (status 9/11) from the DB, <=50 ids per call."""
+    advert_ids = list(
+        (
+            await session.execute(
+                select(Campaign.advert_id)
+                .where(
+                    Campaign.cabinet_id == cabinet_id,
+                    Campaign.status.in_(_ACTIVE_STATUSES),
+                )
+                .order_by(Campaign.advert_id)
+            )
+        ).scalars()
+    )
+    written = 0
+    captured_at = _now_utc()
+    for chunk in _chunked(advert_ids, _MAX_BATCH_IDS):
+        payload = await client.budgets(chunk)
+        await save_raw(session, cabinet_id, _ENDPOINT_BUDGET, 200, payload)
+        written += await insert_budgets(
+            session, cabinet_id, parse_budget(payload), captured_at
+        )
+    return written
+
+
+async def collect_balance(client: WbClient, session: AsyncSession, cabinet_id: int) -> int:
+    """One balance observation; field naming not confirmed (get_any both)."""
+    payload = await client.balance()
+    await save_raw(session, cabinet_id, _ENDPOINT_BALANCE, 200, payload)
+    total = int(get_any(payload, "total", "balance", default=0))
+    return await insert_balance(session, cabinet_id, total, _now_utc())
+
+
+async def collect_fullstats(client: WbClient, session: AsyncSession, cabinet_id: int) -> int:
+    """Per active campaign: window from the last successful run, stats upsert.
+
+    The last success per campaign lives in collection_log
+    (loop_name="fullstats:<advert_id>", status="ok", finished_at). Campaigns
+    with the oldest (or missing) success go first. A WbApiError on ONE
+    campaign is logged "error" and the loop moves on — one bad campaign must
+    not invalidate the whole pass.
+    """
+    advert_ids = list(
+        (
+            await session.execute(
+                select(Campaign.advert_id)
+                .where(
+                    Campaign.cabinet_id == cabinet_id,
+                    Campaign.status.in_(_ACTIVE_STATUSES),
+                )
+                .order_by(Campaign.advert_id)
+            )
+        ).scalars()
+    )
+    entries: list[tuple[datetime, int, datetime | None]] = []
+    for advert_id in advert_ids:
+        last_success = await _last_fullstats_success(session, cabinet_id, advert_id)
+        # missing success sorts first; tz-aware datetime.min as the sentinel
+        entries.append((last_success or datetime.min.replace(tzinfo=UTC), advert_id, last_success))
+    entries.sort()  # oldest success first (never-run first)
+
+    now_msk = datetime.now(_MSK)
+    written = 0
+    for _sort_key, advert_id, last_success in entries:
+        begin, end = next_window(
+            last_success.astimezone(_MSK) if last_success else None, now_msk
+        )
+        try:
+            payload = await client.fullstats([advert_id], begin, end)
+        except WbApiError as exc:
+            logger.warning("fullstats %s (cabinet %s) failed: %s", advert_id, cabinet_id, exc)
+            await log_collection(
+                session, cabinet_id, f"fullstats:{advert_id}", "error", str(exc),
+                None, _now_utc(),
+            )
+            continue
+        await save_raw(session, cabinet_id, _ENDPOINT_FULLSTATS, 200, payload)
+        stat_rows, position_rows = parse_fullstats(payload)
+        written += await upsert_stats(session, cabinet_id, stat_rows)
+        written += await upsert_positions(session, cabinet_id, position_rows)
+        await log_collection(
+            session, cabinet_id, f"fullstats:{advert_id}", "ok",
+            f"stats={len(stat_rows)} positions={len(position_rows)}",
+            None, _now_utc(),
+        )
+    return written
+
+
+async def collect_bids_min(client: WbClient, session: AsyncSession, cabinet_id: int) -> int:
+    """Minimal bids for every nm ever seen in bid_history; response kept raw.
+
+    The bids/min response format is NOT confirmed — store the whole payload as
+    an auction snapshot (parsed={"kind": "bids_min"}); advert_id=0 marks a
+    cabinet-level snapshot no single campaign owns. No bids yet -> skip.
+    """
+    nm_ids = list(
+        (
+            await session.execute(
+                select(BidHistory.nm_id)
+                .where(BidHistory.cabinet_id == cabinet_id)
+                .distinct()
+                .order_by(BidHistory.nm_id)
+            )
+        ).scalars()
+    )
+    if not nm_ids:
+        return 0
+    payload = await client.bids_min(nm_ids)
+    await save_raw(session, cabinet_id, _ENDPOINT_BIDS_MIN, 200, payload)
+    await insert_snapshot(
+        session, cabinet_id, advert_id=0, payload=payload,
+        parsed={"kind": "bids_min"}, captured_at=_now_utc(),
+    )
+    return 1
+
+
+async def collect_auction_snapshot(
+    client: WbClient, session: AsyncSession, cabinet_id: int
+) -> int:
+    """Recommendations snapshot per ACTIVE manual+cpm campaign.
+
+    Only manual+cpm campaigns are queried: recommendations make sense for
+    auction placements; unified/cpc campaigns are skipped (their bid is a
+    single unified value — nothing per-placement to snapshot). Parameters are
+    NOT confirmed by the spike; on a 4xx the error body is logged "error" and
+    the pass continues, other errors propagate to the IntervalLoop.
+    """
+    campaigns = (
+        (
+            await session.execute(
+                select(Campaign)
+                .where(
+                    Campaign.cabinet_id == cabinet_id,
+                    Campaign.status.in_(_ACTIVE_STATUSES),
+                )
+                .order_by(Campaign.advert_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    written = 0
+    for campaign in campaigns:
+        if campaign.bid_type != "manual" or campaign.payment_type != "cpm":
+            continue  # unified/cpc — no auction recommendations to snapshot
+        try:
+            payload = await client.recommendations(
+                {
+                    "advertId": campaign.advert_id,
+                    "type": campaign.type,
+                    "payment_type": "cpm",
+                }
+            )
+        except WbApiError as exc:
+            if not 400 <= exc.status < 500:
+                raise  # 5xx/network — let the loop's backoff handle it
+            logger.warning(
+                "recommendations %s (cabinet %s) failed: %s",
+                campaign.advert_id, cabinet_id, exc,
+            )
+            await log_collection(
+                session, cabinet_id, f"auction_snapshot:{campaign.advert_id}",
+                "error", str(exc), None, _now_utc(),
+            )
+            continue
+        await save_raw(session, cabinet_id, _ENDPOINT_RECOMMENDATIONS, 200, payload)
+        await insert_snapshot(
+            session, cabinet_id, campaign.advert_id, payload=payload,
+            parsed={"kind": "recommendations"}, captured_at=_now_utc(),
+        )
+        written += 1
+    return written
+
+
+# phrase-ish keys accepted in normquery payloads (naming NOT confirmed)
+_PHRASE_KEYS = ("phrase", "normquery", "norm_query", "query", "keyword")
+_LIST_KEYS = ("data", "phrases", "queries", "normqueries", "items")
+
+
+def _extract_phrases(payload: Any) -> list[str]:
+    """Best-effort phrase list from a normquery/list payload of unknown shape."""
+    if isinstance(payload, list):
+        candidates = payload
+    elif isinstance(payload, dict):
+        candidates = next(
+            (value for key in _LIST_KEYS if isinstance(value := payload.get(key), list)),
+            [],
+        )
+    else:
+        candidates = []
+    phrases: list[str] = []
+    for item in candidates:
+        if isinstance(item, str):
+            phrases.append(item)
+        elif isinstance(item, dict):
+            for key in _PHRASE_KEYS:
+                if item.get(key):
+                    phrases.append(str(item[key]))
+                    break
+    return phrases
+
+
+async def collect_clusters(client: WbClient, session: AsyncSession, cabinet_id: int) -> int:
+    """Clusters of manual-bid campaigns: phrase list -> phrase stats.
+
+    Formats are NOT confirmed: phrases are extracted defensively and the raw
+    stats response is stored as-is in clusters.stats jsonb (refine once live
+    responses arrive). 4xx on either call is logged "error" and the pass
+    continues; other errors propagate to the IntervalLoop.
+    """
+    advert_ids = list(
+        (
+            await session.execute(
+                select(Campaign.advert_id)
+                .where(
+                    Campaign.cabinet_id == cabinet_id,
+                    Campaign.status.in_(_ACTIVE_STATUSES),
+                    Campaign.bid_type == "manual",
+                )
+                .order_by(Campaign.advert_id)
+            )
+        ).scalars()
+    )
+    written = 0
+    for advert_id in advert_ids:
+        try:
+            list_payload = await client.normquery_list(advert_id)
+            await save_raw(session, cabinet_id, _ENDPOINT_NORMQUERY_LIST, 200, list_payload)
+            queries = _extract_phrases(list_payload)
+            if not queries:
+                continue
+            stats_payload = await client.normquery_stats(
+                {"advertId": advert_id, "queries": queries}
+            )
+            await save_raw(session, cabinet_id, _ENDPOINT_NORMQUERY_STATS, 200, stats_payload)
+        except WbApiError as exc:
+            if not 400 <= exc.status < 500:
+                raise
+            logger.warning(
+                "normquery %s (cabinet %s) failed: %s", advert_id, cabinet_id, exc
+            )
+            await log_collection(
+                session, cabinet_id, f"clusters:{advert_id}", "error", str(exc),
+                None, _now_utc(),
+            )
+            continue
+        # raw stats response kept per phrase until the format is confirmed
+        rows = [{"norm_query": query, "stats": stats_payload} for query in queries]
+        written += await upsert_clusters(session, cabinet_id, advert_id, rows)
+    return written
+
+
+async def cleanup_raw_responses(session_factory: Callable[[], Any], keep_days: int) -> int:
+    """Delete raw_responses older than keep_days; returns the rows deleted."""
+    cutoff = _now_utc() - timedelta(days=keep_days)
+    async with session_factory() as session:
+        result = await session.execute(
+            delete(RawResponse).where(RawResponse.captured_at < cutoff)
+        )
+        await session.commit()
+        return int(result.rowcount)
+
+
+# -- helpers -----------------------------------------------------------------
+
+
+def _advert_ids_from_count(payload: dict) -> list[int]:
+    """All advertIds from promotion/count across type groups and ALL statuses."""
+    ids: list[int] = []
+    seen: set[int] = set()
+    for group in get_any(payload, "adverts", default=()) or ():
+        for chard in get_any(group, "chards", default=()) or ():
+            for advert_id in get_any(chard, "advertList", "advert_list", default=()) or ():
+                if advert_id not in seen:
+                    seen.add(advert_id)
+                    ids.append(int(advert_id))
+    return ids
+
+
+async def _last_fullstats_success(
+    session: AsyncSession, cabinet_id: int, advert_id: int
+) -> datetime | None:
+    """Last successful fullstats finished_at for one campaign (collection_log)."""
+    result = await session.execute(
+        select(CollectionLog.finished_at)
+        .where(
+            CollectionLog.cabinet_id == cabinet_id,
+            CollectionLog.loop_name == f"fullstats:{advert_id}",
+            CollectionLog.status == "ok",
+            CollectionLog.finished_at.is_not(None),
+        )
+        .order_by(CollectionLog.finished_at.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+# -- loop assembly -----------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class LoopSpec:
+    """One collection loop: its collector function name and period."""
+
+    name: str
+    period_sec: int
+
+
+LOOPS_SPEC: list[LoopSpec] = [
+    LoopSpec("campaigns", 300),
+    LoopSpec("budgets", 300),
+    LoopSpec("balance", 300),
+    LoopSpec("fullstats", 1200),
+    LoopSpec("bids_min", 86400),
+    LoopSpec("auction_snapshot", 3600),
+    LoopSpec("clusters", 86400),
+]
+
+_CLEANUP_NAME = "cleanup"
+_CLEANUP_PERIOD_SEC = 86400
+
+_COLLECTORS: dict[str, Callable[[WbClient, AsyncSession, int], Any]] = {
+    "campaigns": collect_campaigns,
+    "budgets": collect_budgets,
+    "balance": collect_balance,
+    "fullstats": collect_fullstats,
+    "bids_min": collect_bids_min,
+    "auction_snapshot": collect_auction_snapshot,
+    "clusters": collect_clusters,
+}
+
+# process-wide registry so stop_all can cancel loops / close clients
+_tasks: list[asyncio.Task] = []
+_clients: list[WbClient] = []
+
+
+def _bind_collect(
+    client: WbClient,
+    cabinet_id: int,
+    collect: Callable[[WbClient, AsyncSession, int], Any],
+) -> Callable[[], Any]:
+    """Wrap collect_* into the no-arg fn IntervalLoop expects."""
+
+    async def fn() -> int | None:
+        async with SessionLocal() as session:
+            return await collect(client, session, cabinet_id)
+
+    return fn
+
+
+def _bind_cleanup() -> Callable[[], Any]:
+    async def fn() -> int | None:
+        keep_days = get_settings().raw_log_days
+        if keep_days <= 0:
+            return 0
+        return await cleanup_raw_responses(SessionLocal, keep_days)
+
+    return fn
+
+
+async def start_all() -> list[IntervalLoop]:
+    """Build and start one IntervalLoop per (active cabinet x LOOPS_SPEC) plus
+    the cabinetless nightly raw_responses cleaner. Returns the loop list."""
+    loops: list[IntervalLoop] = []
+    async with SessionLocal() as session:
+        cabinets = (
+            (await session.execute(select(Cabinet).where(Cabinet.active.is_(True))))
+            .scalars()
+            .all()
+        )
+    for cabinet in cabinets:
+        client = WbClient(
+            decrypt_token(cabinet.token_encrypted),
+            LimiterRegistry(),
+            cabinet_id=cabinet.id,
+        )
+        _clients.append(client)
+        for spec in LOOPS_SPEC:
+            loop = IntervalLoop(
+                spec.name,
+                cabinet.id,
+                spec.period_sec,
+                _bind_collect(client, cabinet.id, _COLLECTORS[spec.name]),
+            )
+            loops.append(loop)
+    loops.append(IntervalLoop(_CLEANUP_NAME, None, _CLEANUP_PERIOD_SEC, _bind_cleanup()))
+    for loop in loops:
+        _tasks.append(
+            asyncio.create_task(
+                loop.run_forever(), name=f"collector:{loop.name}:{loop.cabinet_id}"
+            )
+        )
+    logger.info("collector started: %d loops for %d cabinets", len(loops), len(cabinets))
+    return loops
+
+
+async def stop_all(loops: list[IntervalLoop]) -> None:
+    """Cancel all collector tasks (started by start_all) and close clients."""
+    for loop in loops:
+        loop.stopped = True
+    tasks = list(_tasks)
+    _tasks.clear()
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    clients = list(_clients)
+    _clients.clear()
+    for client in clients:
+        await client.aclose()
+    logger.info("collector stopped: %d loops", len(loops))
