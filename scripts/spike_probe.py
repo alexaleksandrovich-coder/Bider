@@ -10,25 +10,71 @@ markdown со статусом, заголовками X-Ratelimit и телом
 Токены берутся ТОЛЬКО из env и никогда не печатаются (Authorization не выводится).
 Только stdlib (urllib) — зависимости не требуются.
 Только чтение: GET-ы и POST-эндпоинты чтения (budget, bids/min). Никаких записей в WB.
+SSRF-гигиена: https + фиксированный хост + белый список путей, query через urlencode,
+динамические id только int, DNS резолвится и проверяется на приватные/loopback-адреса,
+редиректы запрещены.
 """
+import ipaddress
 import json
 import os
+import socket
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
 HOST = "https://advert-api.wildberries.ru"
+EXPECTED_HOST = "advert-api.wildberries.ru"
 TIMEOUT = 30
 PAUSE = 1.0  # пауза между вызовами, сек
 ACTIVE_STATUSES = (9, 11)
 
+# Единственные пути, куда разрешено ходить (без query; query — через urlencode).
+ALLOWED_PATHS = frozenset({
+    "/adv/v1/promotion/count",
+    "/api/advert/v1/config",
+    "/adv/v1/balance",
+    "/api/advert/v2/adverts",
+    "/adv/v3/fullstats",
+    "/api/advert/v2/budget",
+    "/api/advert/v1/bids/min",
+    "/api/advert/v0/bids/recommendations",
+})
+
 WAVE1 = [
-    ("GET", "/adv/v1/promotion/count"),
-    ("GET", "/api/advert/v1/config"),
-    ("GET", "/adv/v1/balance"),
-    ("GET", "/api/advert/v2/adverts?ids=0"),  # ожидаемо 4xx: фиксируем формат ошибки
+    ("GET", "/adv/v1/promotion/count", None),
+    ("GET", "/api/advert/v1/config", None),
+    ("GET", "/adv/v1/balance", None),
+    ("GET", "/api/advert/v2/adverts", {"ids": "0"}),  # ожидаемо 4xx: фиксируем формат ошибки
 ]
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Любой редирект — ошибка, а не переход (запрещаем смену цели)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+def validate_target(url: str) -> None:
+    """Разрешаем только https://advert-api.wildberries.ru с публичными IP."""
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme != "https" or parsed.hostname != EXPECTED_HOST or parsed.username:
+        raise ValueError(f"unexpected target: {parsed.scheme}://{parsed.hostname}")
+    for info in socket.getaddrinfo(parsed.hostname, 443, proto=socket.IPPROTO_TCP):
+        ip = ipaddress.ip_address(info[4][0])
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+            or ip.is_unspecified
+        ):
+            raise ValueError(f"resolved to non-public address: {ip}")
 
 
 def msk_today() -> str:
@@ -50,31 +96,38 @@ def safe_json(raw: bytes):
         return {"text": text[:1000]}
 
 
-def call(method: str, path: str, token: str, body=None):
+def call(method: str, path: str, token: str, body=None, query=None):
     """Один пробник: запрос + markdown-блок в stdout. Не бросает исключений.
 
+    path — только из ALLOWED_PATHS; query — dict, сериализуется urlencode.
     Возвращает распарсенное тело (или None при исключении).
     """
+    if path not in ALLOWED_PATHS:
+        raise ValueError(f"path not allowed: {path!r}")
+    url = HOST + path
+    if query:
+        url = url + "?" + urllib.parse.urlencode(query)
+    validate_target(url)
+
     t0 = time.monotonic()
     status = None
     resp_headers = {}
     raw = b""
     exc_repr = None
-    payload = None
     try:
         data = None
         req_headers = {"Authorization": token}  # БЕЗ Bearer
         if body is not None:
             data = json.dumps(body).encode("utf-8")
             req_headers["Content-Type"] = "application/json"
-        req = urllib.request.Request(HOST + path, data=data, headers=req_headers, method=method)
+        req = urllib.request.Request(url, data=data, headers=req_headers, method=method)
         try:
-            with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+            with _OPENER.open(req, timeout=TIMEOUT) as resp:
                 status = resp.status
                 resp_headers = resp.headers
                 raw = resp.read()
         except urllib.error.HTTPError as e:
-            # 4xx/5xx — тоже факт, а не падение.
+            # 4xx/5xx (и редиректы через _NoRedirect) — тоже факт, а не падение.
             status = e.code
             resp_headers = e.headers
             raw = e.read()
@@ -82,7 +135,8 @@ def call(method: str, path: str, token: str, body=None):
         exc_repr = repr(e)
     dt_ms = int((time.monotonic() - t0) * 1000)
 
-    print(f"### {method} {path} -> {status if status is not None else 'EXC'} ({dt_ms}ms)", flush=True)
+    shown = path + ("?" + urllib.parse.urlencode(query) if query else "")
+    print(f"### {method} {shown} -> {status if status is not None else 'EXC'} ({dt_ms}ms)", flush=True)
     if exc_repr is not None:
         print(f"exception: {exc_repr}", flush=True)
     print(
@@ -167,14 +221,14 @@ def collect_nm_ids(node, out, limit=100):
 def wave2(token: str, count_payload) -> None:
     """Follow-ups по данным из count: adverts / budget / fullstats / bids/min / recommendations."""
     ids, id_types = active_ids_from_count(count_payload)
+    ids = [int(i) for i in ids]  # в URL идут только целые
     if not ids:
         print("> нет активных РК (status 9/11 в count) — волна 2 пропущена", flush=True)
         return
     batch = ids[:50]
     print(f"> активных РК (status 9/11): {len(ids)}; берём первые {len(batch)}: {batch}", flush=True)
 
-    id_list = ",".join(str(i) for i in batch)
-    adverts_payload = call("GET", f"/api/advert/v2/adverts?ids={id_list}", token)
+    adverts_payload = call("GET", "/api/advert/v2/adverts", token, query={"ids": ",".join(map(str, batch))})
 
     first_campaign = adverts_payload[0] if isinstance(adverts_payload, list) and adverts_payload else None
     payment_type = find_first_key(first_campaign, ("paymentType", "payment_type"))
@@ -187,8 +241,9 @@ def wave2(token: str, count_payload) -> None:
 
     call(
         "GET",
-        f"/adv/v3/fullstats?ids={ids[0]}&beginDate={msk_days_ago(7)}&endDate={msk_today()}",
+        "/adv/v3/fullstats",
         token,
+        query={"ids": str(ids[0]), "beginDate": msk_days_ago(7), "endDate": msk_today()},
     )
 
     nm_ids: list[int] = []
@@ -202,8 +257,12 @@ def wave2(token: str, count_payload) -> None:
 
     if camp_type is not None and payment_type is not None:
         # ПАРАМЕТРЫ НЕ ПОДТВЕРЖДЕНЫ: при 4xx код+тело фиксируем как факт.
-        params = urllib.parse.urlencode({"type": camp_type, "payment_type": payment_type})
-        call("GET", f"/api/advert/v0/bids/recommendations?{params}", token)
+        call(
+            "GET",
+            "/api/advert/v0/bids/recommendations",
+            token,
+            query={"type": camp_type, "payment_type": payment_type},
+        )
     else:
         print("> type/payment_type первой РК не определены — recommendations пропущен", flush=True)
 
@@ -215,11 +274,14 @@ def run_cabinet(env_name: str, name: str) -> None:
         return
     print(f"## {name}", flush=True)
     count_payload = None
-    for method, path in WAVE1:
-        payload = call(method, path, token)
+    for method, path, query in WAVE1:
+        payload = call(method, path, token, query=query)
         if path == "/adv/v1/promotion/count":
             count_payload = payload
-    wave2(token, count_payload)
+    try:
+        wave2(token, count_payload)
+    except Exception as e:
+        print(f"exception in wave2: {e!r}", flush=True)
     print("", flush=True)
 
 
