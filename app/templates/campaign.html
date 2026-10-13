@@ -1,0 +1,154 @@
+{% extends "base.html" %}
+{% block title %}{{ detail.campaign.name }} — Bider{% endblock %}
+{% block content %}
+<p class="muted"><a href="/cabinets/{{ cabinet.id }}">← {{ cabinet.name }}</a></p>
+<h1>{{ detail.campaign.name }}
+  <span class="badge">{{ type_name(detail.campaign.type) }}</span>
+  <span class="badge status-{{ detail.campaign.status }}">{{ status_name(detail.campaign.status) }}</span>
+</h1>
+<p class="muted">Advert ID: {{ detail.campaign.advert_id }} ·
+  оплата: {{ detail.campaign.payment_type }} · модель ставки: {{ detail.campaign.bid_type }}</p>
+
+<nav class="filters">
+  <a href="?days=7"{% if detail.days == 7 %} class="filter-on"{% endif %}>7 дней</a>
+  <a href="?days=30"{% if detail.days == 30 %} class="filter-on"{% endif %}>30 дней</a>
+</nav>
+
+<section class="card">
+  <h2>Итоги за {{ detail.days }} дней</h2>
+  <table class="money">
+    <tr><th>Показы</th><td class="num">{{ detail.totals.views }}</td></tr>
+    <tr><th>Клики</th><td class="num">{{ detail.totals.clicks }}</td></tr>
+    <tr><th>CTR</th><td class="num">{% if detail.totals.views %}{{ "%.1f%%" | format(detail.totals.clicks * 100 / detail.totals.views) }}{% else %}—{% endif %}</td></tr>
+    <tr><th>Заказы</th><td class="num">{{ detail.totals.orders }}</td></tr>
+    <tr><th>Выкупы</th><td class="num">{{ detail.totals.shks }}</td></tr>
+    <tr><th>Расход</th><td class="num">{{ format_money(detail.totals.sum_kopecks, cabinet.currency) }}</td></tr>
+    <tr><th>Выручка</th><td class="num">{{ format_money(detail.totals.sum_price_kopecks, cabinet.currency) }}</td></tr>
+    <tr><th>ДРР</th><td class="num">{{ drr(detail.totals.sum_kopecks, detail.totals.sum_price_kopecks) or "—" }}</td></tr>
+  </table>
+</section>
+
+{% if detail.campaign.payment_type == "cpc" and detail.budget %}
+<section class="card">
+  <h2>Бюджет</h2>
+  <p>Остаток: <strong class="num">{{ format_money(detail.budget.cash, cabinet.currency) }}</strong>
+     · всего: {{ format_money(detail.budget.total, cabinet.currency) }}</p>
+</section>
+{% endif %}
+
+<h2>Товары</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Nm ID</th><th>Показы</th><th>Клики</th><th>Заказы</th><th>Выкупы</th>
+      <th>Расход</th><th>Выручка</th><th>ДРР</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in detail.per_nm %}
+    <tr>
+      <td>{{ row.nm_id }}</td>
+      <td class="num">{{ row.views }}</td>
+      <td class="num">{{ row.clicks }}</td>
+      <td class="num">{{ row.orders }}</td>
+      <td class="num">{{ row.shks }}</td>
+      <td class="num">{{ format_money(row.sum_kopecks, cabinet.currency) }}</td>
+      <td class="num">{{ format_money(row.sum_price_kopecks, cabinet.currency) }}</td>
+      <td class="num">{{ row.drr or "—" }}</td>
+    </tr>
+    {% endfor %}
+    {% if not detail.per_nm %}<tr><td colspan="8">За период нет статистики.</td></tr>{% endif %}
+  </tbody>
+</table>
+
+{% if detail.campaign.bid_type == "manual" and detail.campaign.payment_type == "cpm" and detail.clusters %}
+<h2>Кластеры</h2>
+<table>
+  <thead><tr><th>Фраза</th><th>Ставка</th><th>Обновлено</th></tr></thead>
+  <tbody>
+    {% for c in detail.clusters %}
+    <tr>
+      <td>{{ c.norm_query }}</td>
+      <td class="num">{% if c.bid_kopecks is not none %}{{ format_money(c.bid_kopecks, cabinet.currency) }}{% else %}—{% endif %}</td>
+      <td>{{ rel_time(c.updated_at) }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<h2>Графики</h2>
+<canvas id="chart-bids" width="900" height="220"></canvas>
+<canvas id="chart-positions" width="900" height="180"></canvas>
+<canvas id="chart-spend" width="900" height="180"></canvas>
+
+<script type="application/json" id="chart-data">{{ chart_data | tojson }}</script>
+<!-- Chart.js 4.4.9, vendored from https://cdn.jsdelivr.net/npm/chart.js@4.4.9/dist/chart.umd.min.js -->
+<script src="/static/vendor/chart.umd.js"></script>
+<script>
+(function () {
+  "use strict";
+  var node = document.getElementById("chart-data");
+  if (!node || typeof Chart === "undefined") { return; }
+  var data = JSON.parse(node.textContent);
+  var GRID = "#34383f";
+  function options() {
+    return {
+      responsive: true,
+      animation: false,
+      scales: {
+        x: { ticks: { color: "#9aa0a6" }, grid: { color: GRID } },
+        y: { position: "left", beginAtZero: true, ticks: { color: "#9aa0a6" }, grid: { color: GRID } }
+      },
+      plugins: { legend: { labels: { color: "#e6e6e6" } } }
+    };
+  }
+  function dataset(label, points, color) {
+    return { label: label, data: points, borderColor: color, backgroundColor: color,
+             spanGaps: true, tension: 0.2, pointRadius: 2 };
+  }
+  // Ставки: одна ось времени, два датасета — поиск и рекомендации.
+  new Chart(document.getElementById("chart-bids"), {
+    type: "line",
+    data: {
+      labels: data.bids.map(function (p) { return p.ts; }),
+      datasets: [
+        dataset("Поиск", data.bids.map(function (p) {
+          return p.placement === "search" ? p.bid_kopecks : null;
+        }), "#4f8cff"),
+        dataset("Рекомендации", data.bids.map(function (p) {
+          return p.placement === "recommendations" ? p.bid_kopecks : null;
+        }), "#f2a33c")
+      ]
+    },
+    options: options()
+  });
+  new Chart(document.getElementById("chart-positions"), {
+    type: "line",
+    data: {
+      labels: data.positions.map(function (p) { return p.date; }),
+      datasets: [dataset("Средняя позиция", data.positions.map(function (p) { return p.avg; }), "#7bd88f")]
+    },
+    options: options()
+  });
+  new Chart(document.getElementById("chart-spend"), {
+    type: "line",
+    data: {
+      labels: data.spend.map(function (p) { return p.date; }),
+      datasets: [dataset("Расход, коп.", data.spend.map(function (p) { return p.sum_kopecks; }), "#ff7b72")]
+    },
+    options: options()
+  });
+})();
+</script>
+
+{% if detail.snapshots_last %}
+<details>
+  <summary>Снапшоты аукциона (последние 5)</summary>
+  {% for s in detail.snapshots_last %}
+  <p class="muted">{{ rel_time(s.captured_at) }}:</p>
+  <pre>{{ s.payload | tojson }}</pre>
+  {% endfor %}
+</details>
+{% endif %}
+{% endblock %}

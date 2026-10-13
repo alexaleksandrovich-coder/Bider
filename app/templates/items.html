@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Товары — Bider{% endblock %}
+{% block content %}
+<h1>Товары</h1>
+
+{% if current is none %}
+<p class="muted">Выберите кабинет:</p>
+<ul>
+  {% for c in cabinets %}
+  <li><a href="/items?cabinet={{ c.id }}">{{ c.name }}</a> <span class="badge">{{ c.wb_type }}</span></li>
+  {% endfor %}
+  {% if not cabinets %}<li>Нет активных кабинетов. Добавьте их на странице
+    <a href="/admin/cabinets">Кабинеты</a>.</li>{% endif %}
+</ul>
+{% else %}
+<p class="muted">
+  Кабинет: <a href="/cabinets/{{ current.id }}">{{ current.name }}</a>
+  · валюта {{ current.currency }} · <a href="/items">выбрать другой</a>
+</p>
+<table>
+  <thead>
+    <tr><th>Nm ID</th><th>Расход</th><th>Выручка</th><th>Заказы</th><th>Выкупы</th><th>ДРР</th></tr>
+  </thead>
+  <tbody>
+    {% for row in rows %}
+    <tr>
+      <td>{{ row.nm_id }}</td>
+      <td class="num">{{ format_money(row.spent, current.currency) }}</td>
+      <td class="num">{{ format_money(row.revenue, current.currency) }}</td>
+      <td class="num">{{ row.orders }}</td>
+      <td class="num">{{ row.shks }}</td>
+      <td class="num">{{ row.drr or "—" }}</td>
+    </tr>
+    {% endfor %}
+    {% if not rows %}<tr><td colspan="6">Нет рекламной статистики.</td></tr>{% endif %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

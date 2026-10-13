@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}Health — Bider{% endblock %}
+{% block content %}
+<h1>Health</h1>
+
+<h2>Циклы сбора</h2>
+<table>
+  <thead>
+    <tr><th>Кабинет</th><th>Цикл</th><th>Статус</th><th>Свежесть</th><th>Период</th><th>Детали</th></tr>
+  </thead>
+  <tbody>
+    {% for row in loops %}
+    <tr>
+      <td>{% if row.cabinet_id is not none %}{{ cabinet_names.get(row.cabinet_id, row.cabinet_id) }}{% else %}—{% endif %}</td>
+      <td>{{ row.loop_name }}</td>
+      <td><span class="badge loop-{{ row.last_status }}">{{ row.last_status }}</span></td>
+      <td>{{ rel_time(row.last_finished_at) }}</td>
+      <td>{{ periods.get(row.loop_name, "—") }}</td>
+      <td class="muted">{{ (row.detail or "")[:200] or "—" }}</td>
+    </tr>
+    {% endfor %}
+    {% if not loops %}<tr><td colspan="6">Циклы ещё не запускались.</td></tr>{% endif %}
+  </tbody>
+</table>
+
+<h2>Журнал (последние 100)</h2>
+<table>
+  <thead>
+    <tr><th>Время</th><th>Кабинет</th><th>Цикл</th><th>Статус</th><th>Детали</th></tr>
+  </thead>
+  <tbody>
+    {% for entry in log %}
+    <tr>
+      <td>{% if entry.finished_at %}{{ entry.finished_at.strftime("%d.%m %H:%M:%S") }}
+          {% elif entry.started_at %}{{ entry.started_at.strftime("%d.%m %H:%M:%S") }}
+          {% else %}—{% endif %}</td>
+      <td>{% if entry.cabinet_id is not none %}{{ cabinet_names.get(entry.cabinet_id, entry.cabinet_id) }}{% else %}—{% endif %}</td>
+      <td>{{ entry.loop_name }}</td>
+      <td><span class="badge loop-{{ entry.status }}">{{ entry.status }}</span></td>
+      <td class="muted">{{ (entry.detail or "")[:200] or "—" }}</td>
+    </tr>
+    {% endfor %}
+    {% if not log %}<tr><td colspan="5">Журнал пуст.</td></tr>{% endif %}
+  </tbody>
+</table>
+{% endblock %}

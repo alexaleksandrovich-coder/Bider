@@ -1,4 +1,5 @@
-"""Dashboard pages: overview, one cabinet's campaigns, admin cabinets (Task 8).
+"""Dashboard pages: overview, one cabinet's campaigns, admin cabinets (Task 8)
+plus campaign detail, items summary and health (Task 9).
 
 All routes are auth-protected via require_user. Money/type/status/freshness
 rendering goes through app/web/format.py, registered as Jinja globals so the
@@ -16,9 +17,17 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.collector.runner import LOOPS_SPEC
 from app.crypto import encrypt_token
 from app.models import Cabinet, User
-from app.queries import STATUS_FILTERS, cabinet_campaigns, overview
+from app.queries import (
+    STATUS_FILTERS,
+    cabinet_campaigns,
+    campaign_detail,
+    health_status,
+    items_summary,
+    overview,
+)
 from app.web.auth import get_db, require_user
 from app.web.format import drr, format_money, rel_time, status_name, type_name
 
@@ -135,4 +144,108 @@ async def _form_error(db: AsyncSession, user: User, request: Request, error: str
         "admin_cabinets.html",
         {"user": user, "cabinets": cabinets, "error": error},
         status_code=422,
+    )
+
+
+# --- Task 9: campaign detail, items, health ------------------------------------
+
+
+_DETAIL_DAYS = (7, 30)
+
+
+@router.get("/cabinets/{cabinet_id}/campaigns/{advert_id}")
+async def campaign_page(
+    request: Request,
+    user: _UserDep,
+    db: _DbDep,
+    cabinet_id: int,
+    advert_id: int,
+    days: int = 7,
+):
+    """Детальная РК: метрики за период, товары, бюджет/кластеры, графики.
+
+    ?days= принимает только 7 или 30 (иначе 422); отсутствие кабинета или
+    РК — 404. Данные графиков едут в страницу как JSON-блок #chart-data
+    (Chart.js — enhancement: без JS таблицы и метрики остаются читаемыми).
+    """
+    cabinet = await db.get(Cabinet, cabinet_id)
+    if cabinet is None:
+        raise HTTPException(status_code=404, detail="Cabinet not found")
+    if days not in _DETAIL_DAYS:
+        raise HTTPException(status_code=422, detail="days must be 7 or 30")
+    detail = await campaign_detail(db, cabinet_id, advert_id, days)
+    if detail["campaign"] is None:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    chart_data = {
+        "bids": detail["bid_series"],  # [{ts, placement, bid_kopecks}]
+        "positions": detail["position_series"],  # [{date, avg}]
+        "spend": detail["spend_series"],  # [{date, sum_kopecks|null}]
+    }
+    return templates.TemplateResponse(
+        request,
+        "campaign.html",
+        {"user": user, "cabinet": cabinet, "detail": detail, "chart_data": chart_data},
+    )
+
+
+@router.get("/items")
+async def items_page(request: Request, user: _UserDep, db: _DbDep, cabinet: int | None = None):
+    """Сводка по товарам (nm) через все РК кабинета, сортировка по расходу.
+
+    Без ?cabinet= показывается страница выбора кабинета (не ошибка):
+    nav-ссылка /items ведёт сюда без параметров.
+    """
+    cabinets = (
+        (await db.execute(select(Cabinet).where(Cabinet.active.is_(True)).order_by(Cabinet.id)))
+        .scalars()
+        .all()
+    )
+    if cabinet is None:
+        return templates.TemplateResponse(
+            request, "items.html", {"user": user, "cabinets": cabinets, "current": None, "rows": []}
+        )
+    current = await db.get(Cabinet, cabinet)
+    if current is None:
+        raise HTTPException(status_code=404, detail="Cabinet not found")
+    rows = await items_summary(db, cabinet)
+    return templates.TemplateResponse(
+        request,
+        "items.html",
+        {"user": user, "cabinets": cabinets, "current": current, "rows": rows},
+    )
+
+
+def _period_label(period_sec: int) -> str:
+    """Loop period for the health table: 300 -> "5 мин", 86400 -> "24 ч"."""
+    if period_sec >= 3600 and period_sec % 3600 == 0:
+        hours = period_sec // 3600
+        return f"{hours} ч"
+    if period_sec % 60 == 0:
+        return f"{period_sec // 60} мин"
+    return f"{period_sec} с"
+
+
+@router.get("/health-page")
+async def health_page(request: Request, user: _UserDep, db: _DbDep):
+    """Свежесть данных по каждому циклу сбора + журнал (последние 100 строк).
+
+    /health уже занят JSON-проверкой живости (Task 2), поэтому страница
+    живёт на /health-page.
+    """
+    status = await health_status(db)
+    cabinet_names = {
+        row.id: row.name
+        for row in (await db.execute(select(Cabinet))).scalars().all()
+    }
+    periods = {spec.name: _period_label(spec.period_sec) for spec in LOOPS_SPEC}
+    return templates.TemplateResponse(
+        request,
+        "health.html",
+        {
+            "user": user,
+            "loops": status["loops"],
+            "log": status["log"],
+            "cabinet_names": cabinet_names,
+            "periods": periods,
+        },
     )

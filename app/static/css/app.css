@@ -235,3 +235,29 @@ button:hover {
 .admin-form button {
   margin-top: 1rem;
 }
+
+/* collection-loop status badges (health page) */
+.loop-ok {
+  color: #7bd88f;
+  border-color: #3d5a45;
+}
+
+.loop-error {
+  color: var(--danger);
+  border-color: #6b3a36;
+}
+
+.loop-paused,
+.loop-forbidden {
+  color: #f2a33c;
+  border-color: #5a4a2e;
+}
+
+/* chart canvases (campaign page) */
+canvas {
+  max-width: 100%;
+  margin: 0.5rem 0;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
