@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block title %}Часы — Bider{% endblock %}
+{% block content %}
+<h1>Часы</h1>
+
+{% if current is none %}
+<p class="muted">Выберите кабинет:</p>
+<ul>
+  {% for c in cabinets %}
+  <li><a href="/hours?cabinet={{ c.id }}">{{ c.name }}</a> <span class="badge">{{ c.wb_type }}</span></li>
+  {% endfor %}
+  {% if not cabinets %}<li>Нет активных кабинетов. Добавьте их на странице
+    <a href="/admin/cabinets">Кабинеты</a>.</li>{% endif %}
+</ul>
+{% else %}
+<p class="muted">
+  Кабинет: <a href="/cabinets/{{ current.id }}">{{ current.name }}</a>
+  · валюта {{ current.currency }} · <a href="/hours">выбрать другой</a>
+</p>
+
+<nav class="filters">
+  <a href="?days=7"{% if days == 7 %} class="filter-on"{% endif %}>7 дней</a>
+  <a href="?days=30"{% if days == 30 %} class="filter-on"{% endif %}>30 дней</a>
+</nav>
+
+<h2>Заказов по часам</h2>
+<canvas id="chart-hours" width="900" height="260" data-currency="{{ current.currency }}"></canvas>
+
+<script type="application/json" id="chart-data">{{ chart_data | tojson }}</script>
+<!-- Chart.js 4.4.9, vendored from https://cdn.jsdelivr.net/npm/chart.js@4.4.9/dist/chart.umd.min.js -->
+<script src="/static/vendor/chart.umd.js"></script>
+<script>
+(function () {
+  "use strict";
+  var node = document.getElementById("chart-data");
+  var canvas = document.getElementById("chart-hours");
+  if (!node || !canvas || typeof Chart === "undefined") { return; }
+  var rows = JSON.parse(node.textContent);
+  var currency = canvas.dataset.currency || "";
+  function money(kopecks) { return (kopecks / 100).toFixed(2) + " " + currency; }
+  new Chart(canvas, {
+    type: "bar",
+    data: {
+      labels: rows.map(function (r) { return r.hour; }),
+      datasets: [{
+        label: "Заказы",
+        data: rows.map(function (r) { return r.orders; }),
+        backgroundColor: "#4f8cff"
+      }]
+    },
+    options: {
+      responsive: true,
+      animation: false,
+      scales: {
+        x: { ticks: { color: "#9aa0a6" }, grid: { color: "#34383f" } },
+        y: { position: "left", beginAtZero: true, ticks: { precision: 0, color: "#9aa0a6" },
+             grid: { color: "#34383f" }, title: { display: true, text: "Заказы" } }
+      },
+      plugins: {
+        legend: { labels: { color: "#e6e6e6" } },
+        tooltip: {
+          callbacks: {
+            afterLabel: function (ctx) {
+              return "Выручка: " + money(rows[ctx.dataIndex].revenue);
+            }
+          }
+        }
+      }
+    }
+  });
+})();
+</script>
+
+<p class="muted">Час берётся из времени последнего изменения заказа (аппроксимация).</p>
+
+<table>
+  <thead>
+    <tr><th>Час</th><th>Заказы</th><th>Выручка</th></tr>
+  </thead>
+  <tbody>
+    {% for row in rows %}
+    <tr>
+      <td class="num">{{ "%02d" | format(row.hour) }}:00</td>
+      <td class="num">{{ row.orders }}</td>
+      <td class="num">{{ format_money(row.revenue_kopecks, current.currency) }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

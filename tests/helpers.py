@@ -6,11 +6,22 @@ cabinet is flushed" — see tests/web/test_pages.py for the pattern.
 """
 
 from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 from app.crypto import encrypt_token
-from app.models import Balance, BidHistory, Cabinet, Campaign, CollectionLog, Stat
+from app.models import (
+    Balance,
+    BidHistory,
+    Cabinet,
+    Campaign,
+    CollectionLog,
+    Order,
+    Stat,
+)
 
 DEFAULT_TOKEN = "x-test-token"
+
+_MSK = ZoneInfo("Europe/Moscow")  # orders date/hour are Moscow time (phase 2)
 
 
 def make_cabinet(
@@ -90,6 +101,29 @@ def make_campaign(
         bid_type=bid_type,
         placement_search=placement_search,
         placement_reco=placement_reco,
+    )
+
+
+def make_order(
+    cabinet_id: int | None,
+    srid: str,
+    date: date,
+    hour: int,
+    *,
+    nm_id: int = 1,
+    price_kopecks: int = 1000,
+    is_cancelled: bool = False,
+) -> Order:
+    """An orders-table row (phase 2): date/hour are MSK, money in kopecks."""
+    return Order(
+        srid=srid,
+        cabinet_id=cabinet_id,
+        nm_id=nm_id,
+        date=date,
+        hour=hour,
+        price_kopecks=price_kopecks,
+        date_time=datetime(date.year, date.month, date.day, hour, tzinfo=_MSK),
+        is_cancelled=is_cancelled,
     )
 
 

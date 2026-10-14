@@ -26,6 +26,7 @@ from app.queries import (
     cabinet_campaigns,
     campaign_detail,
     health_status,
+    hours_heatmap,
     items_summary,
     overview,
 )
@@ -358,6 +359,61 @@ async def items_page(request: Request, user: _UserDep, db: _DbDep, cabinet: int 
         request,
         "items.html",
         {"user": user, "cabinets": cabinets, "current": current, "rows": rows},
+    )
+
+
+# --- Task 4 (phase 2): hours heatmap page --------------------------------------
+
+
+@router.get("/hours")
+async def hours_page(
+    request: Request,
+    user: _UserDep,
+    db: _DbDep,
+    cabinet: int | None = None,
+    days: int = 7,
+):
+    """Тепловая карта заказов по часам (МСК) за 7/30 дней.
+
+    Без ?cabinet= показывается страница выбора кабинета (как на /items).
+    ?days= принимает только 7 или 30 (иначе 422); неизвестный кабинет — 404.
+    Данные графика едут в страницу как JSON-блок #chart-data: ровно 24
+    элемента {hour, orders, revenue} (revenue — копейки; Chart.js рисует
+    столбцы заказов, выручка — в подсказке). Chart.js — enhancement: без JS
+    читается таблица «Час — заказы — выручка».
+    """
+    if days not in _DETAIL_DAYS:
+        raise HTTPException(status_code=422, detail="days must be 7 or 30")
+    cabinets = (
+        (await db.execute(select(Cabinet).where(Cabinet.active.is_(True)).order_by(Cabinet.id)))
+        .scalars()
+        .all()
+    )
+    if cabinet is None:
+        return templates.TemplateResponse(
+            request,
+            "hours.html",
+            {"user": user, "cabinets": cabinets, "current": None, "rows": [], "days": days},
+        )
+    current = await db.get(Cabinet, cabinet)
+    if current is None:
+        raise HTTPException(status_code=404, detail="Cabinet not found")
+    rows = await hours_heatmap(db, cabinet, days)
+    chart_data = [
+        {"hour": row["hour"], "orders": row["orders"], "revenue": row["revenue_kopecks"]}
+        for row in rows
+    ]
+    return templates.TemplateResponse(
+        request,
+        "hours.html",
+        {
+            "user": user,
+            "cabinets": cabinets,
+            "current": current,
+            "rows": rows,
+            "days": days,
+            "chart_data": chart_data,
+        },
     )
 
 
