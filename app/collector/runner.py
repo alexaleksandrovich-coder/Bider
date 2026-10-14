@@ -13,7 +13,7 @@ formats marked NOT confirmed are stored raw and parsed defensively — see
 import asyncio
 import hashlib
 import logging
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
@@ -96,13 +96,13 @@ async def collect_campaigns(client: WbClient, session: AsyncSession, cabinet_id:
     count_payload = await client.promotion_count()
     await save_raw(session, cabinet_id, _ENDPOINT_COUNT, 200, count_payload)
     # NB: all statuses, not only active — pauses/finishings must stay visible.
-    advert_ids = _advert_ids_from_count(count_payload)
+    advert_ids, types = _advert_ids_and_types_from_count(count_payload)
 
     rows: list[dict] = []
     for chunk in _chunked(advert_ids, _MAX_BATCH_IDS):
         payload = await client.adverts(chunk)
         await save_raw(session, cabinet_id, _ENDPOINT_ADVERTS, 200, payload)
-        rows.extend(parse_adverts(payload))
+        rows.extend(parse_adverts(payload, types))
 
     await upsert_campaigns(session, cabinet_id, rows)
     await append_bids(session, cabinet_id, rows, captured_at=_now_utc())
@@ -375,17 +375,46 @@ async def cleanup_raw_responses(session_factory: Callable[[], Any], keep_days: i
 # -- helpers -----------------------------------------------------------------
 
 
-def _advert_ids_from_count(payload: dict) -> list[int]:
-    """All advertIds from promotion/count across type groups and ALL statuses."""
+def _advert_ids_and_types_from_count(payload: dict) -> tuple[list[int], dict[int, int]]:
+    """All advert ids from promotion/count across type groups and ALL statuses.
+
+    Живой факт (спайк 13.10.2026): adverts[].advert_list[].advertId (тип —
+    на группе). Legacy-форма adverts[].chards[].advertList из старого API
+    тоже принимается (плоский список int). Возвращает (ids, {id: type}).
+    """
     ids: list[int] = []
+    types: dict[int, int] = {}
     seen: set[int] = set()
     for group in get_any(payload, "adverts", default=()) or ():
+        group_type = _to_int_safe(get_any(group, "type"))
+        # legacy: chards[].advertList = [int, ...]
         for chard in get_any(group, "chards", default=()) or ():
             for advert_id in get_any(chard, "advertList", "advert_list", default=()) or ():
+                if isinstance(advert_id, Mapping):
+                    advert_id = get_any(advert_id, "advertId", "advert_id")
+                advert_id = _to_int_safe(advert_id)
                 if advert_id not in seen:
                     seen.add(advert_id)
-                    ids.append(int(advert_id))
-    return ids
+                    ids.append(advert_id)
+                    types[advert_id] = group_type
+        # live: advert_list[] = [{"advertId": int, ...}, ...]
+        for item in get_any(group, "advertList", "advert_list", default=()) or ():
+            if isinstance(item, Mapping):
+                advert_id = _to_int_safe(get_any(item, "advertId", "advert_id"))
+            else:
+                advert_id = _to_int_safe(item)
+            if advert_id and advert_id not in seen:
+                seen.add(advert_id)
+                ids.append(advert_id)
+                types[advert_id] = group_type
+    return ids, types
+
+
+def _to_int_safe(value: object) -> int:
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
 
 
 async def _last_fullstats_success(

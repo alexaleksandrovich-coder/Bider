@@ -69,24 +69,35 @@ def _to_date(value: Any) -> date | None:
         return None
 
 
-def parse_adverts(payload: list[dict]) -> list[dict]:
+def parse_adverts(
+    payload: Mapping[str, Any] | list[Any],
+    types: Mapping[int, int] | None = None,
+) -> list[dict]:
     """Parse GET /api/advert/v2/adverts into campaign rows (bids flattened).
+
+    Живой факт (спайк 13.10.2026, BYN-кабинет): ответ ОБЁРНУТ в {"adverts": [...]},
+    у кампании поле `id` (не advertId), name и payment_type лежат в `settings`,
+    время — в `timestamps.updated`, поля `type` в элементе НЕТ (он приходит в
+    promotion/count — передавайте `types: {advert_id: type}`). Legacy-имена
+    (advertId, name, paymentType на верхнем уровне) тоже принимаются.
 
     Row: {advert_id, name, type, status, payment_type, bid_type, search,
     recommendations, change_time: datetime|None, bids: [{nm_id, placement,
-    bid_kopecks}]}. Placements come from settings.placements or the top level
-    (both spellings accepted — сверить после получения токенов). bids_kopecks
-    "combined" (unified bid) is deliberately ignored: BidRow / bid_history
-    store only search/recommendations placements. Missing or zero bids are
-    not recorded.
+    bid_kopecks}]}. bids_kopecks "combined" (unified bid) is deliberately
+    ignored; missing or zero bids are not recorded.
     """
+    if isinstance(payload, Mapping):
+        payload = get_any(payload, "adverts", "data", default=()) or ()
     rows: list[dict] = []
     for camp in payload:
+        if not isinstance(camp, Mapping):
+            continue
+        settings_obj = get_any(camp, "settings")
+        if not isinstance(settings_obj, Mapping):
+            settings_obj = {}
         placements = get_any(camp, "placements")
         if placements is None:
-            settings_obj = get_any(camp, "settings")
-            if isinstance(settings_obj, Mapping):
-                placements = get_any(settings_obj, "placements")
+            placements = get_any(settings_obj, "placements")
         if not isinstance(placements, Mapping):
             placements = {}
 
@@ -103,19 +114,36 @@ def parse_adverts(payload: list[dict]) -> list[dict]:
                         {"nm_id": nm_id, "placement": placement, "bid_kopecks": _to_int(bid)}
                     )
 
+        advert_id = _to_int(get_any(camp, "advertId", "advert_id", "id"))
+        type_value = (
+            (types or {}).get(advert_id)
+            if types is not None
+            else _to_int(get_any(camp, "type")) or None
+        )
+        timestamps = get_any(camp, "timestamps")
+        if not isinstance(timestamps, Mapping):
+            timestamps = {}
+        change_time = _to_datetime(
+            get_any(camp, "changeTime", "changed_time", "change_time")
+        ) or _to_datetime(get_any(timestamps, "updated"))
+
         rows.append(
             {
-                "advert_id": _to_int(get_any(camp, "advertId", "advert_id")),
-                "name": str(get_any(camp, "name", default="")),
-                "type": _to_int(get_any(camp, "type")),
+                "advert_id": advert_id,
+                "name": str(
+                    get_any(camp, "name", default=None)
+                    or get_any(settings_obj, "name", default="")
+                ),
+                "type": _to_int(type_value),
                 "status": _to_int(get_any(camp, "status")),
-                "payment_type": str(get_any(camp, "paymentType", "payment_type", default="")),
+                "payment_type": str(
+                    get_any(camp, "paymentType", "payment_type", default=None)
+                    or get_any(settings_obj, "payment_type", default="")
+                ),
                 "bid_type": str(get_any(camp, "bidType", "bid_type", default="")),
                 "search": bool(placements.get("search")),
                 "recommendations": bool(placements.get("recommendations")),
-                "change_time": _to_datetime(
-                    get_any(camp, "changeTime", "changed_time", "change_time")
-                ),
+                "change_time": change_time,
                 "bids": bids,
             }
         )

@@ -234,3 +234,41 @@ def test_parsers_empty_payloads():
     assert parse_adverts([]) == []
     assert parse_fullstats([]) == ([], [])
     assert parse_budget([]) == []
+
+
+def test_parse_adverts_live_wrapped_shape():
+    """Живая форма (спайк 13.10.2026): {"adverts": [...]}, id/settings.name/
+    settings.payment_type/timestamps.updated, type приходит из count (types)."""
+    rows = parse_adverts(_load("adverts_live_sample.json"), types={20902648: 9})
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["advert_id"] == 20902648
+    assert r["name"] == "Кампания от 25.10.2024"
+    assert r["type"] == 9
+    assert r["status"] == 7
+    assert r["payment_type"] == "cpm"
+    assert r["bid_type"] == "manual"
+    assert r["search"] is True
+    assert r["recommendations"] is False
+    assert r["change_time"] == datetime.fromisoformat("2025-08-04T11:07:04.873268+03:00")
+    # нулевая ставка recommendations не пишется
+    assert r["bids"] == [{"nm_id": 273461001, "placement": "search", "bid_kopecks": 21500}]
+
+
+def test_parse_adverts_live_wrapped_without_types():
+    """Без types type = 0 (неизвестный), а не падение."""
+    rows = parse_adverts(_load("adverts_live_sample.json"))
+    assert rows[0]["type"] == 0
+
+
+def test_parse_adverts_count_legacy_and_live_ids():
+    from app.collector.runner import _advert_ids_and_types_from_count
+
+    legacy = {"adverts": [{"type": 8, "chards": [{"status": 9, "advertList": [1, 2]}]}]}
+    live = {
+        "adverts": [
+            {"type": 9, "status": 11, "advert_list": [{"advertId": 100, "changeTime": "x"}]}
+        ]
+    }
+    assert _advert_ids_and_types_from_count(legacy) == ([1, 2], {1: 8, 2: 8})
+    assert _advert_ids_and_types_from_count(live) == ([100], {100: 9})

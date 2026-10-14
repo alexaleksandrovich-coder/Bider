@@ -1,0 +1,29 @@
+{
+  "adverts": [
+    {
+      "bid_type": "manual",
+      "currency": "BYN",
+      "id": 20902648,
+      "nm_settings": [
+        {
+          "bids_kopecks": { "recommendations": 0, "search": 21500 },
+          "nm_id": 273461001,
+          "subject": { "id": 4982, "name": "приманки мягкие" }
+        }
+      ],
+      "restrictions": { "can_change_nms": true },
+      "settings": {
+        "name": "Кампания от 25.10.2024",
+        "payment_type": "cpm",
+        "placements": { "recommendations": false, "search": true }
+      },
+      "status": 7,
+      "timestamps": {
+        "created": "2024-10-25T20:11:42.452965+03:00",
+        "deleted": "2024-11-18T08:41:31.238099+03:00",
+        "started": "2024-10-31T13:22:22.936266+03:00",
+        "updated": "2025-08-04T11:07:04.873268+03:00"
+      }
+    }
+  ]
+}
