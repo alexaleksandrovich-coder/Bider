@@ -32,7 +32,9 @@ def next_window(
     """
     end = now.date()
     if last_success is None:
-        begin = end - timedelta(days=DEFAULT_WINDOW_DAYS - 1)
+        # Первый сбор кампании берёт сразу максимум глубины (31 день), чтобы
+        # ретроспективная история на дашборде (период «30 дней») не была пустой.
+        begin = end - timedelta(days=max_days - 1)
     else:
         begin = min(last_success.date(), end)  # future timestamp: never backfill
     if (end - begin).days >= max_days:  # more than max_days inclusive days

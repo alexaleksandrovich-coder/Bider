@@ -20,8 +20,9 @@ _NOW = datetime(2026, 10, 13, 10, 0, tzinfo=_MSK)
 @pytest.mark.parametrize(
     ("last_success", "expected"),
     [
-        # No prior success: default window = last 7 days inclusive.
-        (None, (date(2026, 10, 7), date(2026, 10, 13))),
+        # No prior success: first collection takes the full 31-day depth
+        # (retrospective history for the dashboard's "30 days" period).
+        (None, (date(2026, 9, 13), date(2026, 10, 13))),
         # Recent success: resume from that day (overlap of one day is fine,
         # stats upserts are idempotent).
         (datetime(2026, 10, 10, 18, 30, tzinfo=_MSK), (date(2026, 10, 10), date(2026, 10, 13))),
