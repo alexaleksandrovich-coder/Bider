@@ -19,6 +19,7 @@ from sqlalchemy import (
     Index,
     Integer,
     Numeric,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -244,3 +245,72 @@ class RawResponse(Base):
     status: Mapped[int] = mapped_column(Integer, nullable=False)
     payload: Mapped[dict | None] = mapped_column(JSONB)
     captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class Order(Base):
+    """One WB order row (statistics-api supplier/orders), deduplicated by srid.
+
+    `srid` is WB's free-form order id (text, unlimited length); money is
+    integer kopecks (finishedPrice * 100); date/hour are Moscow time.
+    """
+
+    __tablename__ = "orders"
+    __table_args__ = (Index("ix_orders_cabinet_date_hour", "cabinet_id", "date", "hour"),)
+
+    srid: Mapped[str] = mapped_column(Text, primary_key=True)
+    cabinet_id: Mapped[int] = mapped_column(
+        ForeignKey("cabinets.id", ondelete="CASCADE"), nullable=False
+    )
+    nm_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    date: Mapped[date] = mapped_column(Date, nullable=False)
+    hour: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    price_kopecks: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    date_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    is_cancelled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+
+
+class Schedule(Base):
+    """Per-campaign showing schedule approved via the UI: 24×0/1 hours (MSK)."""
+
+    __tablename__ = "schedules"
+
+    cabinet_id: Mapped[int] = mapped_column(
+        ForeignKey("cabinets.id", ondelete="CASCADE"), primary_key=True
+    )
+    advert_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    hours: Mapped[list[int]] = mapped_column(JSONB, nullable=False)
+    daily_limit_kopecks: Mapped[int | None] = mapped_column(BigInteger)
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ControllerLog(Base):
+    """One row per controller action (pause/start/limit); dry_run logs status="dry"."""
+
+    __tablename__ = "controller_log"
+
+    id: Mapped[int] = mapped_column(BigInteger, **_BIGSERIAL_PK)  # bigserial
+    cabinet_id: Mapped[int | None] = mapped_column(ForeignKey("cabinets.id", ondelete="CASCADE"))
+    advert_id: Mapped[int | None] = mapped_column(BigInteger)
+    action: Mapped[str] = mapped_column(Text, nullable=False)  # "pause" | "start" | "limit"
+    status: Mapped[str] = mapped_column(Text, nullable=False)  # "ok" | "error" | "dry" | "skipped"
+    detail: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
+class AppSetting(Base):
+    """Key/value settings (controller_mode, controller_kill_switch, ...)."""
+
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(Text, primary_key=True)
+    value: Mapped[dict] = mapped_column(JSONB, nullable=False)
