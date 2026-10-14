@@ -295,3 +295,61 @@ def test_parse_adverts_count_legacy_and_live_ids():
     }
     assert _advert_ids_and_types_from_count(legacy) == ([1, 2], {1: 8, 2: 8})
     assert _advert_ids_and_types_from_count(live) == ([100], {100: 9})
+
+
+def test_parse_fullstats_live_apps_shape():
+    """Живая форма (спайк 14.10.2026): days[].apps[]{appType, nms[]},
+    деньги — дробные единицы валюты (sum: 0.21 BYN -> 21 копейка)."""
+    payload = [
+        {
+            "advertId": 40908103,
+            "days": [
+                {
+                    "date": "2026-10-12",
+                    "apps": [
+                        {
+                            "appType": 64,
+                            "nms": [
+                                {
+                                    "nmId": 273420081,
+                                    "views": 1,
+                                    "clicks": 1,
+                                    "atbs": 0,
+                                    "orders": 0,
+                                    "shks": 0,
+                                    "canceled": 0,
+                                    "sum": 0.21,
+                                    "sum_price": 0,
+                                }
+                            ],
+                        },
+                        {
+                            "appType": 32,
+                            "nms": [
+                                {
+                                    "nmId": 273420081,
+                                    "views": 2,
+                                    "clicks": 0,
+                                    "atbs": 0,
+                                    "orders": 0,
+                                    "shks": 0,
+                                    "canceled": 0,
+                                    "sum": 0.0,
+                                    "sum_price": 0.0,
+                                }
+                            ],
+                        },
+                    ],
+                }
+            ],
+        }
+    ]
+    stats, positions = parse_fullstats(payload)
+    assert positions == []
+    by_app = {r["app_type"]: r for r in stats}
+    assert set(by_app) == {"64", "32"}
+    r64 = by_app["64"]
+    assert (r64["views"], r64["clicks"], r64["sum_kopecks"]) == (1, 1, 21)
+    assert r64["cpc_kopecks"] == 21
+    r32 = by_app["32"]
+    assert (r32["views"], r32["clicks"], r32["sum_kopecks"], r32["cpc_kopecks"]) == (2, 0, 0, 0)

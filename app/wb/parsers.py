@@ -44,6 +44,22 @@ def _to_int(value: Any) -> int:
         return 0
 
 
+def _money_to_kopecks(value: Any) -> int:
+    """Money -> kopecks. Живой факт (14.10.2026): WB отдаёт дробные единицы
+    валюты (0.21 BYN); они умножаются на 100. Целые значения считаются уже
+    копейками (legacy-форма по спеке) и идут как есть."""
+    if value is None:
+        return 0
+    if isinstance(value, bool):  # bool is an int subclass — not money
+        return 0
+    if isinstance(value, int):
+        return value
+    try:
+        return round(float(value) * 100)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _to_datetime(value: Any) -> datetime | None:
     """ISO datetime parse, tolerate None/unparsable -> None."""
     if value is None:
@@ -179,37 +195,52 @@ def parse_fullstats(payload: list[dict]) -> tuple[list[dict], list[dict]]:
             stat_date = _to_date(get_any(day, "date"))
             if stat_date is None:
                 continue  # no key to aggregate on
-            app_type = str(get_any(day, "appType", "app_type", default=""))
-            for nm in get_any(day, "nms", default=()):
-                nm_id = _to_int(get_any(nm, "nmID", "nmId", "nm_id"))
-                key = (advert_id, nm_id, stat_date, app_type)
-                row = agg.setdefault(
-                    key,
-                    {
-                        "advert_id": advert_id,
-                        "nm_id": nm_id,
-                        "date": stat_date,
-                        "app_type": app_type,
-                        "views": 0,
-                        "clicks": 0,
-                        "atbs": 0,
-                        "orders": 0,
-                        "shks": 0,
-                        "sum_kopecks": 0,
-                        "sum_price_kopecks": 0,
-                        "canceled": 0,
-                    },
-                )
-                # repeated (date, appType) entries accumulate
-                row["views"] += _to_int(get_any(nm, "views"))
-                row["clicks"] += _to_int(get_any(nm, "clicks"))
-                row["atbs"] += _to_int(get_any(nm, "atbs"))
-                row["orders"] += _to_int(get_any(nm, "orders"))
-                row["shks"] += _to_int(get_any(nm, "shks"))
-                row["canceled"] += _to_int(get_any(nm, "canceled"))
-                # money stored as-is (assumed kopecks — see module docstring)
-                row["sum_kopecks"] += _to_int(get_any(nm, "sum"))
-                row["sum_price_kopecks"] += _to_int(get_any(nm, "sum_price", "sumPrice"))
+            # Живой факт (спайк 14.10.2026): платформы лежат в day["apps"][]
+            # ({appType: 64|32|..., nms: [...]}); legacy-форма — appType/nms
+            # прямо на дне. Деньги в apps[] — дробные единицы валюты (0.21
+            # BYN), конвертируются в копейки; legacy-целые считаются копейками.
+            apps = get_any(day, "apps")
+            if isinstance(apps, list) and apps:
+                groups = [
+                    (get_any(a, "appType", "app_type", default=""), a)
+                    for a in apps
+                    if isinstance(a, Mapping)
+                ]
+            else:
+                groups = [(get_any(day, "appType", "app_type", default=""), day)]
+            for app_type_raw, source in groups:
+                app_type = str(app_type_raw)
+                for nm in get_any(source, "nms", default=()):
+                    nm_id = _to_int(get_any(nm, "nmID", "nmId", "nm_id"))
+                    key = (advert_id, nm_id, stat_date, app_type)
+                    row = agg.setdefault(
+                        key,
+                        {
+                            "advert_id": advert_id,
+                            "nm_id": nm_id,
+                            "date": stat_date,
+                            "app_type": app_type,
+                            "views": 0,
+                            "clicks": 0,
+                            "atbs": 0,
+                            "orders": 0,
+                            "shks": 0,
+                            "sum_kopecks": 0,
+                            "sum_price_kopecks": 0,
+                            "canceled": 0,
+                        },
+                    )
+                    # repeated (date, appType) entries accumulate
+                    row["views"] += _to_int(get_any(nm, "views"))
+                    row["clicks"] += _to_int(get_any(nm, "clicks"))
+                    row["atbs"] += _to_int(get_any(nm, "atbs"))
+                    row["orders"] += _to_int(get_any(nm, "orders"))
+                    row["shks"] += _to_int(get_any(nm, "shks"))
+                    row["canceled"] += _to_int(get_any(nm, "canceled"))
+                    row["sum_kopecks"] += _money_to_kopecks(get_any(nm, "sum"))
+                    row["sum_price_kopecks"] += _money_to_kopecks(
+                        get_any(nm, "sum_price", "sumPrice")
+                    )
 
         for booster in get_any(camp, "boosterStats", "booster_stats", default=()):
             stat_date = _to_date(get_any(booster, "date"))
