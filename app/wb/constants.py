@@ -11,7 +11,8 @@ HOST = "https://advert-api.wildberries.ru"
 
 # (requests, period_sec) per limit class.
 LIMITS = {
-    "fullstats": (3, 60),
+    # Live fact (spike 13.10.2026, BYN cabinet): X-Ratelimit-Limit=1/min — stricter than the spec's 3/min.
+    "fullstats": (1, 60),
     "budget": (20, 60),
     "bids_min": (20, 60),
     "recommendations": (5, 60),

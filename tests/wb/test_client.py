@@ -1,5 +1,6 @@
 """Tests for WbClient over respx: no real network, fake limiter time."""
 
+import json
 import logging
 from datetime import date
 
@@ -136,3 +137,13 @@ async def test_fullstats_sends_dates_as_iso_and_ids_comma_joined():
 def test_unknown_path_rejected_by_klass_mapper():
     with pytest.raises(ValueError):
         klass("/api/adv/definitely/unknown")
+
+
+@respx.mock
+async def test_budgets_sends_advertids_field():
+    """Живой факт (спайк 13.10.2026): WB ждёт advertIds, не ids — иначе 400."""
+    route = respx.post(f"{HOST}/api/advert/v2/budget").respond(200, json=[])
+    async with make_client() as client:
+        await client.budgets([111, 222])
+    request_body = json.loads(route.calls.last.request.content)
+    assert request_body == {"advertIds": [111, 222]}

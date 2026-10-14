@@ -145,10 +145,14 @@ class WbClient:
         )
 
     async def budgets(self, advert_ids: list[int]) -> list[dict]:
-        """POST /api/advert/v2/budget — budgets (read-by-POST)."""
+        """POST /api/advert/v2/budget — budgets (read-by-POST).
+
+        Живой факт (спайк 13.10.2026, BYN-кабинет): поле тела — advertIds,
+        не ids («advertIds must contain from 1 to 50 items»).
+        """
         path = "/api/advert/v2/budget"
         return await self._request(
-            klass(path), "POST", path, json_body={"ids": list(advert_ids)}
+            klass(path), "POST", path, json_body={"advertIds": list(advert_ids)}
         )
 
     async def balance(self) -> dict:
