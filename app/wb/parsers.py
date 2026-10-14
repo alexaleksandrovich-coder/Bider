@@ -45,15 +45,16 @@ def _to_int(value: Any) -> int:
 
 
 def _money_to_kopecks(value: Any) -> int:
-    """Money -> kopecks. Живой факт (14.10.2026): WB отдаёт дробные единицы
-    валюты (0.21 BYN); они умножаются на 100. Целые значения считаются уже
-    копейками (legacy-форма по спеке) и идут как есть."""
+    """Money in CURRENCY UNITS -> kopecks.
+
+    Живой факт (14.10.2026, fullstats): и sum (дробная: 8.42 BYN), и sum_price
+    (целая: 245 BYN на 15 заказов) приходят в ЕДИНИЦАХ ВАЛЮТЫ — всегда ×100.
+    Целое значение НЕ означает «уже копейки» (245 был 245 BYN, не копейки).
+    """
     if value is None:
         return 0
     if isinstance(value, bool):  # bool is an int subclass — not money
         return 0
-    if isinstance(value, int):
-        return value
     try:
         return round(float(value) * 100)
     except (TypeError, ValueError):

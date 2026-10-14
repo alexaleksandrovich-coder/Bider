@@ -105,10 +105,10 @@ def test_parse_fullstats_fixture():
         "atbs": 2,
         "orders": 1,
         "shks": 1,
-        "sum_kopecks": 2500,
-        "sum_price_kopecks": 50000,
+        "sum_kopecks": 250000,  # 2500 currency units * 100
+        "sum_price_kopecks": 5000000,
         "canceled": 0,
-        "cpc_kopecks": 500,  # 2500 // 5
+        "cpc_kopecks": 50000,  # 250000 // 5
     }
 
     android10 = next(r for r in stat_rows if r["app_type"] == "android")
@@ -139,10 +139,10 @@ def test_parse_fullstats_fixture():
         "atbs": 3,
         "orders": 2,
         "shks": 2,
-        "sum_kopecks": 2000,
-        "sum_price_kopecks": 40000,
+        "sum_kopecks": 200000,
+        "sum_price_kopecks": 4000000,
         "canceled": 1,
-        "cpc_kopecks": 500,
+        "cpc_kopecks": 50000,
     }
 
     nm222 = next(r for r in stat_rows if r["nm_id"] == 222)
@@ -156,8 +156,8 @@ def test_parse_fullstats_fixture():
         "atbs": 1,
         "orders": 1,
         "shks": 1,
-        "sum_kopecks": 800,
-        "sum_price_kopecks": 10000,
+        "sum_kopecks": 80000,
+        "sum_price_kopecks": 1000000,
         "canceled": 0,
         "cpc_kopecks": 800,
     }
