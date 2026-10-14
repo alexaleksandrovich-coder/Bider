@@ -122,10 +122,10 @@ def test_parse_fullstats_fixture():
         "atbs": 1,
         "orders": 1,
         "shks": 0,
-        "sum_kopecks": 1500,
-        "sum_price_kopecks": 30000,
+        "sum_kopecks": 150000,  # 1500 currency units * 100
+        "sum_price_kopecks": 3000000,
         "canceled": 0,
-        "cpc_kopecks": 750,  # 1500 // 2
+        "cpc_kopecks": 75000,  # 150000 // 2
     }
 
     web11 = next(r for r in stat_rows if r["date"] == date(2026, 10, 11) and r["nm_id"] == 111)
