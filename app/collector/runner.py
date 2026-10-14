@@ -27,6 +27,7 @@ from app.collector.loops import IntervalLoop, Sleep
 from app.collector.orders import collect_orders
 from app.collector.windows import next_window
 from app.config import get_settings
+from app.controller.runner import controller_forever
 from app.crypto import decrypt_token
 from app.db import SessionLocal
 from app.models import BidHistory, Cabinet, Campaign, CollectionLog, RawResponse
@@ -541,6 +542,11 @@ _COLLECTORS: dict[str, Callable[[WbClient, AsyncSession, int], Any]] = {
 _tasks: list[asyncio.Task] = []
 _clients: list[WbClient] = []
 
+# controller tasks are NOT collection loops (not in LOOPS_SPEC): a separate
+# per-cabinet registry so stop_for_cabinet cancels exactly the controller of
+# the cabinet being stopped (the tick loop lives in app.controller.runner).
+_controller_tasks: dict[int, asyncio.Task] = {}
+
 # supervisor state: per-cabinet loop entries (task, loop, token fingerprint)
 # plus the TWO clients all of a cabinet's loops share — the advert-api
 # WbClient and the statistics-api StatisticsClient (orders loop). The
@@ -588,7 +594,8 @@ async def start_for_cabinet(cabinet: Cabinet) -> list[IntervalLoop]:
     carrying the token fingerprint), the shared advert-api client in
     _cabinet_clients and the shared statistics-api client in
     _cabinet_stats_clients (both on one limiter registry; a loop binds the
-    client its LoopSpec names).
+    client its LoopSpec names). The ad-showing controller (phase 2, NOT a
+    collection loop) is started as a separate task on the same client.
     """
     fingerprint = _token_fingerprint(cabinet.token_encrypted)
     token = decrypt_token(cabinet.token_encrypted)
@@ -613,30 +620,42 @@ async def start_for_cabinet(cabinet: Cabinet) -> list[IntervalLoop]:
         )
         entries.append((task, loop, fingerprint))
     _running[cabinet.id] = entries
+    _controller_tasks[cabinet.id] = asyncio.create_task(
+        controller_forever(lambda: client, cabinet_id=cabinet.id),
+        name=f"controller:{cabinet.id}",
+    )
     logger.info(
-        "collector: started %d loops for cabinet %d (%s)",
+        "collector: started %d loops + controller for cabinet %d (%s)",
         len(loops), cabinet.id, cabinet.name,
     )
     return loops
 
 
 async def stop_for_cabinet(cabinet_id: int) -> None:
-    """Cancel one cabinet's loop tasks and close its clients; no-op if not running."""
+    """Cancel one cabinet's loop tasks, its controller task and close its
+    clients; no-op if not running."""
     entries = _running.pop(cabinet_id, None)
     client = _cabinet_clients.pop(cabinet_id, None)
     stats_client = _cabinet_stats_clients.pop(cabinet_id, None)
-    if not entries and client is None and stats_client is None:
+    controller_task = _controller_tasks.pop(cabinet_id, None)
+    if not entries and client is None and stats_client is None and controller_task is None:
         return
     tasks = [task for task, _loop, _fp in entries or []]
     for task, loop, _fp in entries or []:
         loop.stopped = True
         task.cancel()
+    if controller_task is not None:
+        controller_task.cancel()
+        tasks.append(controller_task)
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
     for closing in (client, stats_client):
         if closing is not None:
             await closing.aclose()
-    logger.info("collector: stopped cabinet %d (%d loops)", cabinet_id, len(entries or ()))
+    logger.info(
+        "collector: stopped cabinet %d (%d loops, controller %s)",
+        cabinet_id, len(entries or ()), "stopped" if controller_task else "was not running",
+    )
 
 
 async def supervisor_tick() -> int:

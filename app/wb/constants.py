@@ -27,6 +27,10 @@ LIMITS = {
     "count": (5, 1),
     "balance": (1, 1),
     "normquery": (5, 60),
+    # pause/start (phase 2): spec table — personal 5/s (200 ms interval, burst 5)
+    "control": (5, 1),
+    # daily-limits GET/PUT (phase 2): spec + live (spike-2 prod): 5/min, 12 s interval
+    "daily_limits": (5, 60),
 }  # from the WB spec (snapshot 26.09.2026); verify against live headers once tokens are available — see .scratch/facts.md
 
 # Exact path prefixes mapped to a limit class (first match wins; no prefix is
@@ -38,9 +42,13 @@ _PATH_CLASS: tuple[tuple[str, str], ...] = (
     ("/api/advert/v2/budget", "budget"),
     ("/api/advert/v1/bids/min", "bids_min"),
     ("/api/advert/v0/bids/recommendations", "recommendations"),
+    ("/api/advert/v0/daily-limits", "daily_limits"),
     ("/api/advert/v2/adverts", "adverts"),
     ("/adv/v1/promotion/count", "count"),
     ("/adv/v1/balance", "balance"),
+    # pause/start (phase 2 controller): one class for both switch endpoints
+    ("/adv/v0/pause", "control"),
+    ("/adv/v0/start", "control"),
     ("/adv/v0/normquery", "normquery"),
     ("/api/advert/v1/normquery", "normquery"),
     # The task text lists only "/adv/v0/normquery" and "/api/advert/v1/normquery"

@@ -24,7 +24,9 @@ logger = logging.getLogger(__name__)
 RetrySleep = Callable[[float], Awaitable[None]]
 
 _MAX_ADVERTS_IDS = 50
+_MAX_DAILY_LIMIT_IDS = 100
 _DEFAULT_RETRY_AFTER = 5.0
+_NO_CHANGE_MARK = "Статус кампании не изменен"
 
 
 def _error_detail(response: httpx.Response) -> str:
@@ -36,6 +38,15 @@ def _error_detail(response: httpx.Response) -> str:
     if isinstance(body, dict) and "detail" in body:
         return str(body["detail"])
     return response.text
+
+
+def _is_no_change(response: httpx.Response) -> bool:
+    """422 no-op discriminator for pause/start: either the spec's sentinel
+    «Статус кампании не изменен» is in the body, or the body is text/plain
+    (the form the spec documents for this response)."""
+    if _NO_CHANGE_MARK in response.text:
+        return True
+    return response.headers.get("content-type", "").startswith("text/plain")
 
 
 class WbClient:
@@ -78,6 +89,22 @@ class WbClient:
         params: Mapping[str, Any] | None = None,
         json_body: Any = None,
     ) -> Any:
+        response = await self._fetch(klass, method, path, params=params, json_body=json_body)
+        if response.is_success:
+            return response.json()
+        raise WbApiError(response.status_code, _error_detail(response))
+
+    async def _fetch(
+        self,
+        klass: str,
+        method: str,
+        path: str,
+        *,
+        params: Mapping[str, Any] | None = None,
+        json_body: Any = None,
+    ) -> httpx.Response:
+        """One rate-limited request with the single 429 retry; returns the raw
+        response so callers can inspect status/headers (pause/start 422)."""
         await self.limiter.bucket(self.cabinet_id, klass).acquire()
         headers = {"Authorization": self._token}
         try:
@@ -89,10 +116,7 @@ class WbClient:
 
         if response.status_code == 429:
             response = await self._retry_429(method, path, params, json_body, headers, response)
-
-        if response.is_success:
-            return response.json()
-        raise WbApiError(response.status_code, _error_detail(response))
+        return response
 
     async def _retry_429(
         self,
@@ -206,6 +230,88 @@ class WbClient:
         """POST /adv/v1/normquery/stats — cluster stats (body passed as-is)."""
         path = "/adv/v1/normquery/stats"
         return await self._request(klass(path), "POST", path, json_body=body)
+
+    # -- write endpoints (phase 2 controller; live only after owner's go-ahead) --
+
+    async def pause(self, advert_id: int) -> None:
+        """GET /adv/v0/pause?id= — pause a running (status 9) campaign.
+
+        200 (no body) -> None; 422 «Статус кампании не изменен» -> None too —
+        the campaign is already paused, the expected no-op on retries (spec:
+        text/plain 422); other non-2xx raise WbApiError. Limit class
+        "control" (5/s personal).
+        """
+        await self._switch("/adv/v0/pause", advert_id)
+
+    async def start(self, advert_id: int) -> None:
+        """GET /adv/v0/start?id= — resume a paused (status 4/11) campaign.
+
+        Same contract as pause(); a 400 "Low Budget" (not enough budget)
+        surfaces as WbApiError — check the budget before starting (spec note).
+        """
+        await self._switch("/adv/v0/start", advert_id)
+
+    async def _switch(self, path: str, advert_id: int) -> None:
+        """Shared pause/start core: 200 and the 422 no-change no-op -> None."""
+        response = await self._fetch(klass(path), "GET", path, params={"id": advert_id})
+        if response.is_success:
+            return  # 200 carries no body
+        if response.status_code == 422 and _is_no_change(response):
+            return  # already in the desired state — not an error
+        raise WbApiError(response.status_code, _error_detail(response))
+
+    async def daily_limits_get(self, advert_ids: list[int]) -> list[dict]:
+        """GET /api/advert/v0/daily-limits?advertIds= — native daily limits.
+
+        Живой факт (спайк-2 прод 14.10.2026): daily-limits существует ТОЛЬКО
+        для cpc-кампаний (смешанный список даёт 400 «daily limit is not
+        available for CPM campaigns») — caller passes cpc ids only. The
+        {"adverts": [...]} wrapper is unwrapped and int/bool fields coerced;
+        more than 100 ids are truncated (WB caps advertIds at 100).
+        """
+        if len(advert_ids) > _MAX_DAILY_LIMIT_IDS:
+            logger.warning(
+                "daily_limits_get(): %d ids requested, truncating to %d",
+                len(advert_ids), _MAX_DAILY_LIMIT_IDS,
+            )
+            advert_ids = advert_ids[:_MAX_DAILY_LIMIT_IDS]
+        path = "/api/advert/v0/daily-limits"
+        payload = await self._request(
+            klass(path), "GET", path, params={"advertIds": ",".join(map(str, advert_ids))}
+        )
+        return [
+            {
+                "advertId": int(item["advertId"]),
+                "enabled": bool(item["enabled"]),
+                "dailyLimit": int(item["dailyLimit"]),
+                "spentToday": int(item["spentToday"]),
+                "carryOverEnabled": bool(item["carryOverEnabled"]),
+                "valid": bool(item["valid"]),
+                "requiredLimit": int(item["requiredLimit"]),
+            }
+            for item in (payload.get("adverts") or [])
+        ]
+
+    async def daily_limits_put(
+        self,
+        advert_ids: list[int],
+        enabled: bool,
+        daily_limit_kopecks: int | None = None,
+        carry_over: bool | None = None,
+    ) -> dict:
+        """PUT /api/advert/v0/daily-limits — ONE limit for the whole batch.
+
+        Body {"advertIds": [...], "enabled": bool[, "dailyLimit": int kopecks,
+        "carryOverEnabled": bool]} — dailyLimit/carryOverEnabled are sent only
+        when given (switching off is just {"advertIds", "enabled": false}).
+        Personal/service tokens only (spec: x-token-types)."""
+        path = "/api/advert/v0/daily-limits"
+        body: dict[str, Any] = {"advertIds": list(advert_ids), "enabled": enabled}
+        if daily_limit_kopecks is not None:
+            body["dailyLimit"] = int(daily_limit_kopecks)
+        if carry_over is not None:
+            body["carryOverEnabled"] = carry_over
+        return await self._request(klass(path), "PUT", path, json_body=body)
 
     # -- lifecycle -----------------------------------------------------------
 

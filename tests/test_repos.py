@@ -222,3 +222,33 @@ async def test_log_collection_writes_rows(db_session):
     assert rows[1].loop_name == "fullstats"
     assert rows[1].status == "error"
     assert rows[1].detail == "403 scope is not allowed"
+
+
+# --- app_settings (get_setting / set_setting) ------------------------------------
+
+
+async def test_get_setting_default_when_absent(db_session):
+    from app.repos import get_setting
+
+    assert await get_setting(db_session, "controller_mode", "dry_run") == "dry_run"
+    assert await get_setting(db_session, "nope") is None
+
+
+async def test_set_setting_upserts_scalars_and_objects(db_session):
+    from app.repos import get_setting, set_setting
+
+    # jsonb хранит и скаляры: kill-switch bool, coverage int, mode str
+    await set_setting(db_session, "controller_kill_switch", True)
+    await set_setting(db_session, "coverage_pct", 90)
+    await set_setting(db_session, "controller_mode", "dry_run")
+    assert await get_setting(db_session, "controller_kill_switch") is True
+    assert await get_setting(db_session, "coverage_pct") == 90
+    assert await get_setting(db_session, "controller_mode") == "dry_run"
+
+    # повторная запись того же ключа — обновление, а не дубль (PK key)
+    await set_setting(db_session, "controller_mode", "live")
+    assert await get_setting(db_session, "controller_mode") == "live"
+
+    # словарь тоже валидное jsonb-значение
+    await set_setting(db_session, "extra", {"a": 1})
+    assert await get_setting(db_session, "extra") == {"a": 1}

@@ -9,12 +9,14 @@ values exactly as parsed — int kopecks, scale pending spike confirmation
 
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import func, insert
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
+    AppSetting,
     AuctionSnapshot,
     Balance,
     BidHistory,
@@ -297,3 +299,20 @@ async def log_collection(
     )
     await session.commit()
     return int(result.rowcount)
+
+
+async def get_setting(session: AsyncSession, key: str, default: Any = None) -> Any:
+    """Value of one app_settings key (jsonb — scalar or object), `default` if absent.
+
+    Values are stored as raw jsonb: set_setting(..., False) reads back as
+    False, set_setting(..., 90) as 90, dicts stay dicts."""
+    row = await session.get(AppSetting, key)
+    return default if row is None else row.value
+
+
+async def set_setting(session: AsyncSession, key: str, value: Any) -> None:
+    """Upsert one app_settings key with a jsonb value; commits."""
+    stmt = pg_insert(AppSetting).values(key=key, value=value)
+    stmt = stmt.on_conflict_do_update(index_elements=["key"], set_={"value": stmt.excluded.value})
+    await session.execute(stmt)
+    await session.commit()

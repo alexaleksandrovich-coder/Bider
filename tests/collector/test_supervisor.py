@@ -246,6 +246,26 @@ async def test_stop_for_cabinet_unknown_id_is_noop(schema, clean_supervisor):
     assert 987654321 not in runner._running
 
 
+async def test_controller_task_started_and_stopped_with_cabinet(schema, clean_supervisor):
+    """Контроллер (phase 2) — НЕ цикл сбора: отдельный таск в
+    _controller_tasks, не входит в LOOPS_SPEC/_running и не меняет счётчики
+    циклов (8). stop_for_cabinet гасит его вместе с циклами."""
+    cid = await _seed_cabinet("sup-controller")
+    clean_supervisor.append(cid)
+
+    loops = await runner.start_for_cabinet(await _get_cabinet(cid))
+
+    assert len(loops) == 8  # только циклы сбора, контроллер среди них не считается
+    controller_task = runner._controller_tasks.get(cid)
+    assert controller_task is not None
+    assert not controller_task.done()
+
+    await runner.stop_for_cabinet(cid)
+
+    assert cid not in runner._controller_tasks
+    assert controller_task.cancelled()
+
+
 # --- supervisor_tick -------------------------------------------------------------
 
 
