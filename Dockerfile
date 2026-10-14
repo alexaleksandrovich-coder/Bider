@@ -9,6 +9,7 @@ WORKDIR /app
 COPY pyproject.toml alembic.ini docker-entrypoint.sh ./
 COPY app ./app
 COPY migrations ./migrations
+COPY scripts ./scripts
 
 RUN pip install --no-cache-dir . && chmod +x docker-entrypoint.sh
 
