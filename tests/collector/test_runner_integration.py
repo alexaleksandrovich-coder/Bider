@@ -233,9 +233,10 @@ async def test_full_pipeline_writes_all_tables(db_session: AsyncSession) -> None
     ]
     assert all(row.status == "ok" for row in fullstats_logs)
 
-    # second fullstats pass: window resumes from the last success (today)
+    # second fullstats pass: the window is ALWAYS the full 31 days now
+    # (WB refines stats retroactively; sliding windows lost days forever)
     await collect_fullstats(client, db_session, cab)
-    assert client.fullstats_calls[3][1:] == (today, today)
+    assert client.fullstats_calls[3][1:] == (today - timedelta(days=30), today)
 
     # bids_min: nm ids from the existing bid history, snapshot stored raw
     n = await collect_bids_min(client, db_session, cab)

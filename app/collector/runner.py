@@ -143,13 +143,14 @@ async def collect_balance(client: WbClient, session: AsyncSession, cabinet_id: i
 
 
 async def collect_fullstats(client: WbClient, session: AsyncSession, cabinet_id: int) -> int:
-    """Per active campaign: window from the last successful run, stats upsert.
+    """Per active campaign: the FULL 31-day window every pass, stats upsert.
 
-    The last success per campaign lives in collection_log
-    (loop_name="fullstats:<advert_id>", status="ok", finished_at). Campaigns
-    with the oldest (or missing) success go first. A WbApiError on ONE
-    campaign is logged "error" and the loop moves on — one bad campaign must
-    not invalidate the whole pass.
+    Живой факт: WB уточняет статистику задним числом (атрибуция 7 дней), а
+    скользящее окно «от прошлого успеха» навсегда теряло дни, уже попавшие в
+    прошлый проход. Полное окно каждый проход дороже по лимиту (fullstats
+    1 req/мин → 20 кампаний ≈ 20 минут ≈ период цикла), зато история не рвётся.
+    Порядок — по advert_id. WbApiError на ОДНОЙ кампании пишется "error", проход
+    продолжается.
     """
     advert_ids = list(
         (
@@ -163,19 +164,12 @@ async def collect_fullstats(client: WbClient, session: AsyncSession, cabinet_id:
             )
         ).scalars()
     )
-    entries: list[tuple[datetime, int, datetime | None]] = []
-    for advert_id in advert_ids:
-        last_success = await _last_fullstats_success(session, cabinet_id, advert_id)
-        # missing success sorts first; tz-aware datetime.min as the sentinel
-        entries.append((last_success or datetime.min.replace(tzinfo=UTC), advert_id, last_success))
-    entries.sort()  # oldest success first (never-run first)
 
-    now_msk = datetime.now(_MSK)
+    today_msk = datetime.now(_MSK).date()
+    begin, end = next_window(None, datetime.now(_MSK))  # always the full 31 days
+
     written = 0
-    for _sort_key, advert_id, last_success in entries:
-        begin, end = next_window(
-            last_success.astimezone(_MSK) if last_success else None, now_msk
-        )
+    for advert_id in advert_ids:
         try:
             payload = await client.fullstats([advert_id], begin, end)
         except WbApiError as exc:
@@ -194,6 +188,9 @@ async def collect_fullstats(client: WbClient, session: AsyncSession, cabinet_id:
             f"stats={len(stat_rows)} positions={len(position_rows)}",
             None, _now_utc(),
         )
+        if datetime.now(_MSK).date() != today_msk:  # midnight crossed mid-pass
+            today_msk = datetime.now(_MSK).date()
+            begin, end = next_window(None, datetime.now(_MSK))
     return written
 
 
