@@ -16,13 +16,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sqlalchemy import select  # noqa: E402
+from spike2_orders import analyze_orders, call, msk_rfc3339_days_ago
+from sqlalchemy import select
 
-from app.crypto import decrypt_token  # noqa: E402
-from app.db import SessionLocal  # noqa: E402
-from app.models import Cabinet, Campaign  # noqa: E402
-
-from spike2_orders import analyze_orders, call, msk_rfc3339_days_ago  # noqa: E402
+from app.crypto import decrypt_token
+from app.db import SessionLocal
+from app.models import Cabinet, Campaign
 
 ACTIVE_STATUSES = (9, 11)
 
@@ -31,7 +30,7 @@ async def first_active_cabinet() -> tuple[str, int, list[int]]:
     """Токен + id первого активного кабинета и до 100 его campaign_id (сначала активные)."""
     async with SessionLocal() as db:
         cabinet = (
-            (await db.execute(select(Cabinet).where(Cabinet.active == True)))  # noqa: E712
+            (await db.execute(select(Cabinet).where(Cabinet.active == True)))
             .scalars()
             .first()
         )
@@ -78,7 +77,7 @@ def main() -> None:
     )
     try:
         analyze_orders(payload)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         print(f"exception in analyze_orders: {e!r}", flush=True)
 
 

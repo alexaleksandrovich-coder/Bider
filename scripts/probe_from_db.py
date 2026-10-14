@@ -12,17 +12,17 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sqlalchemy import select  # noqa: E402
+from sqlalchemy import select
 
-from app.crypto import decrypt_token  # noqa: E402
-from app.db import SessionLocal  # noqa: E402
-from app.models import Cabinet  # noqa: E402
+from app.crypto import decrypt_token
+from app.db import SessionLocal
+from app.models import Cabinet
 
 
 async def first_active_token() -> str:
     async with SessionLocal() as db:
         cabinet = (
-            (await db.execute(select(Cabinet).where(Cabinet.active == True)))  # noqa: E712
+            (await db.execute(select(Cabinet).where(Cabinet.active == True)))
             .scalars()
             .first()
         )
@@ -34,7 +34,8 @@ async def first_active_token() -> str:
 def main() -> None:
     token = asyncio.run(first_active_token())
     probe = Path(__file__).with_name("spike_probe.py")
-    subprocess.run([sys.executable, str(probe)], env=dict(os.environ, WB_TOKEN_BY1=token))
+    subprocess.run([sys.executable, str(probe)], check=False,
+                   env=dict(os.environ, WB_TOKEN_BY1=token))
 
 
 if __name__ == "__main__":

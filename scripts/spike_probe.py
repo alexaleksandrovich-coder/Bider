@@ -92,7 +92,7 @@ def safe_json(raw: bytes):
     text = raw.decode("utf-8", errors="replace")
     try:
         return json.loads(text)
-    except Exception:
+    except ValueError:  # json.loads
         return {"text": text[:1000]}
 
 
@@ -131,7 +131,7 @@ def call(method: str, path: str, token: str, body=None, query=None):
             status = e.code
             resp_headers = e.headers
             raw = e.read()
-    except Exception as e:  # спайк: фиксируем всё
+    except Exception as e:  # noqa: BLE001  # спайк: фиксируем всё
         exc_repr = repr(e)
     dt_ms = int((time.monotonic() - t0) * 1000)
 
@@ -280,9 +280,9 @@ def run_cabinet(env_name: str, name: str) -> None:
             count_payload = payload
     try:
         wave2(token, count_payload)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         print(f"exception in wave2: {e!r}", flush=True)
-    print("", flush=True)
+    print(flush=True)
 
 
 def main() -> None:

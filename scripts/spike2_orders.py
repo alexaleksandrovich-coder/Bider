@@ -87,7 +87,7 @@ def safe_json(raw: bytes):
     text = raw.decode("utf-8", errors="replace")
     try:
         return json.loads(text)
-    except Exception:
+    except ValueError:  # json.loads
         return {"text": text[:1000]}
 
 
@@ -121,7 +121,7 @@ def call(host: str, method: str, path: str, token: str, query=None):
             status = e.code
             resp_headers = e.headers
             raw = e.read()
-    except Exception as e:  # спайк: фиксируем всё
+    except Exception as e:  # noqa: BLE001  # спайк: фиксируем всё
         exc_repr = repr(e)
     dt_ms = int((time.monotonic() - t0) * 1000)
 
@@ -161,7 +161,7 @@ def analyze_orders(payload) -> None:
     print(f"> строк заказа: {len(payload)} (dict: {len(rows)})", flush=True)
     if not rows:
         return
-    fields = sorted({k for r in rows for k in r.keys()})
+    fields = sorted({k for r in rows for k in r})
     print(f"> имена полей ({len(fields)}): {fields}", flush=True)
 
     for key in MONEY_KEYS:
@@ -206,9 +206,9 @@ def run_token(env_name: str, name: str, days: int) -> None:
     )
     try:
         analyze_orders(payload)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         print(f"exception in analyze_orders: {e!r}", flush=True)
-    print("", flush=True)
+    print(flush=True)
 
 
 def main() -> None:
