@@ -197,7 +197,7 @@ async def test_full_pipeline_writes_all_tables(db_session: AsyncSession) -> None
     assert n == 1  # one budget row from the sample
     assert client.budgets_calls == [[1001, 1002, 1003]]  # all in one <=50 chunk
     budget = (await db_session.execute(select(Budget))).scalar_one()
-    assert (budget.advert_id, budget.total_kopecks) == (1, 150000)
+    assert (budget.advert_id, budget.total_kopecks) == (1, 15000000)  # 150000 * 100 (kopecks)
 
     # balance
     n = await collect_balance(client, db_session, cab)
