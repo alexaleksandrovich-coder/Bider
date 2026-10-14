@@ -211,9 +211,9 @@ async def test_full_pipeline_writes_all_tables(db_session: AsyncSession) -> None
     assert [call[0] for call in client.fullstats_calls] == [1001, 1002, 1003]
     today = datetime.now(_MSK).date()
     assert all(
-        begin == today - timedelta(days=6) and end == today
+        begin == today - timedelta(days=30) and end == today
         for _, begin, end in client.fullstats_calls
-    )  # no prior success -> default 7-day window
+    )  # no prior success -> full 31-day window (retro history)
     assert await _count(db_session, Stat) == 4
     assert await _count(db_session, Position) == 2
     logs = (
