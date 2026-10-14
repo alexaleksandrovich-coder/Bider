@@ -1,16 +1,23 @@
-"""WB advert-api constants: host, rate-limit classes, path->class mapper.
+"""WB API constants: hosts, rate-limit classes, path->class mapper.
 
-LIMITS come from the WB spec (snapshot 26.09.2026). .scratch/facts.md marks
-them as NOT yet confirmed against live X-Ratelimit-* headers: the spike got
-403 "scope is not allowed for this resource" on every method (the available
-tokens lack the "Advancement" category). Re-verify and edit here — and only
-here — once real tokens arrive.
+HOST is the advert-api; STATISTICS_HOST is the statistics-api (supplier
+orders) — a different server with its own limits, but the limit classes and
+the single klass() mapper are shared here (the two path namespaces don't
+clash). LIMITS come from the WB spec (snapshot 26.09.2026). .scratch/facts.md
+marks them as NOT yet confirmed against live X-Ratelimit-* headers: the spike
+got 403 "scope is not allowed for this resource" on every method (the
+available tokens lack the "Advancement" category). Re-verify and edit here —
+and only here — once real tokens arrive.
 """
 
 HOST = "https://advert-api.wildberries.ru"
+STATISTICS_HOST = "https://statistics-api.wildberries.ru"
 
 # (requests, period_sec) per limit class.
 LIMITS = {
+    # Live fact (spike-2 prod 14.10.2026, «Улов»): after one request
+    # X-Ratelimit-Remaining=9, Limit=10 — 1/min refill with a burst of 10.
+    "orders": (1, 60),
     # Live fact (spike 13.10.2026, BYN cabinet): X-Ratelimit-Limit=1/min — stricter than the spec's 3/min.
     "fullstats": (1, 60),
     "budget": (20, 60),
@@ -25,6 +32,8 @@ LIMITS = {
 # Exact path prefixes mapped to a limit class (first match wins; no prefix is
 # a prefix of another, so order is only cosmetic).
 _PATH_CLASS: tuple[tuple[str, str], ...] = (
+    # statistics-api host (orders); the namespace does not clash with advert-api
+    ("/api/v1/supplier/orders", "orders"),
     ("/adv/v3/fullstats", "fullstats"),
     ("/api/advert/v2/budget", "budget"),
     ("/api/advert/v1/bids/min", "bids_min"),

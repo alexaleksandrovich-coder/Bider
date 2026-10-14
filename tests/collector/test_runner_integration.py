@@ -147,6 +147,7 @@ async def test_loops_spec_periods() -> None:
         "bids_min": 86400,
         "auction_snapshot": 3600,
         "clusters": 86400,
+        "orders": 60,
     }
 
 

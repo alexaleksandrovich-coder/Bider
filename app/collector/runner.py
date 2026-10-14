@@ -1,8 +1,10 @@
 """Collector jobs: one collect_* function per loop + loop assembly (start_all).
 
 Every collect_* takes (client, session, cabinet_id), performs ONLY read calls
-on the WB client, writes through app.repos (each call commits) and returns
-the number of processed rows for collection_log detail.
+on its client — the advert-api WbClient or the statistics-api
+StatisticsClient (orders; see LoopSpec.client) — writes through app.repos
+(each call commits) and returns the number of processed rows for
+collection_log detail.
 
 Raw responses: every endpoint hit is journaled into raw_responses via
 save_raw (retention = Settings.raw_log_days; 0 disables writing). Response
@@ -22,6 +24,7 @@ from sqlalchemy import delete, insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.collector.loops import IntervalLoop, Sleep
+from app.collector.orders import collect_orders
 from app.collector.windows import next_window
 from app.config import get_settings
 from app.crypto import decrypt_token
@@ -42,6 +45,7 @@ from app.wb.client import WbClient
 from app.wb.errors import WbApiError
 from app.wb.limiter import LimiterRegistry
 from app.wb.parsers import get_any, parse_adverts, parse_budget, parse_fullstats
+from app.wb.statistics_client import StatisticsClient
 
 logger = logging.getLogger(__name__)
 
@@ -496,10 +500,15 @@ async def sync_cabinet_once(cabinet_id: int) -> dict[str, int | str]:
 
 @dataclass(frozen=True)
 class LoopSpec:
-    """One collection loop: its collector function name and period."""
+    """One collection loop: collector name, period, and which client serves it.
+
+    client: "advert" -> the cabinet's WbClient (advert-api), "statistics" ->
+    its StatisticsClient (statistics-api, host/limits differ; orders loop).
+    """
 
     name: str
     period_sec: int
+    client: str = "advert"
 
 
 LOOPS_SPEC: list[LoopSpec] = [
@@ -510,6 +519,8 @@ LOOPS_SPEC: list[LoopSpec] = [
     LoopSpec("bids_min", 86400),
     LoopSpec("auction_snapshot", 3600),
     LoopSpec("clusters", 86400),
+    # statistics-api refreshes orders every 30 min; 60s stays under the 1/min limit
+    LoopSpec("orders", 60, client="statistics"),
 ]
 
 _CLEANUP_NAME = "cleanup"
@@ -523,6 +534,7 @@ _COLLECTORS: dict[str, Callable[[WbClient, AsyncSession, int], Any]] = {
     "bids_min": collect_bids_min,
     "auction_snapshot": collect_auction_snapshot,
     "clusters": collect_clusters,
+    "orders": collect_orders,  # StatisticsClient is a WbClient subclass
 }
 
 # process-wide registry so stop_all can cancel loops / close clients
@@ -530,10 +542,13 @@ _tasks: list[asyncio.Task] = []
 _clients: list[WbClient] = []
 
 # supervisor state: per-cabinet loop entries (task, loop, token fingerprint)
-# plus the one client all of a cabinet's loops share. The fingerprint is
-# sha256 of token_encrypted — a token change is detected WITHOUT decrypting.
+# plus the TWO clients all of a cabinet's loops share — the advert-api
+# WbClient and the statistics-api StatisticsClient (orders loop). The
+# fingerprint is sha256 of token_encrypted — a token change is detected
+# WITHOUT decrypting.
 _running: dict[int, list[tuple[asyncio.Task, IntervalLoop, str]]] = {}
 _cabinet_clients: dict[int, WbClient] = {}
+_cabinet_stats_clients: dict[int, StatisticsClient] = {}
 _supervisor_task: asyncio.Task | None = None
 
 
@@ -570,23 +585,27 @@ async def start_for_cabinet(cabinet: Cabinet) -> list[IntervalLoop]:
     """Build and start the LOOPS_SPEC collection loops for one cabinet.
 
     Registers the loop tasks in _running (keyed by cabinet id, each entry
-    carrying the token fingerprint) and the shared client in _cabinet_clients.
+    carrying the token fingerprint), the shared advert-api client in
+    _cabinet_clients and the shared statistics-api client in
+    _cabinet_stats_clients (both on one limiter registry; a loop binds the
+    client its LoopSpec names).
     """
     fingerprint = _token_fingerprint(cabinet.token_encrypted)
-    client = WbClient(
-        decrypt_token(cabinet.token_encrypted),
-        LimiterRegistry(),
-        cabinet_id=cabinet.id,
-    )
+    token = decrypt_token(cabinet.token_encrypted)
+    limiter = LimiterRegistry()
+    client = WbClient(token, limiter, cabinet_id=cabinet.id)
+    stats_client = StatisticsClient(token, limiter, cabinet_id=cabinet.id)
     _cabinet_clients[cabinet.id] = client
+    _cabinet_stats_clients[cabinet.id] = stats_client
     loops: list[IntervalLoop] = []
     entries: list[tuple[asyncio.Task, IntervalLoop, str]] = []
     for spec in LOOPS_SPEC:
+        loop_client = stats_client if spec.client == "statistics" else client
         loop = IntervalLoop(
             spec.name,
             cabinet.id,
             spec.period_sec,
-            _bind_collect(client, cabinet.id, _COLLECTORS[spec.name]),
+            _bind_collect(loop_client, cabinet.id, _COLLECTORS[spec.name]),
         )
         loops.append(loop)
         task = asyncio.create_task(
@@ -602,10 +621,11 @@ async def start_for_cabinet(cabinet: Cabinet) -> list[IntervalLoop]:
 
 
 async def stop_for_cabinet(cabinet_id: int) -> None:
-    """Cancel one cabinet's loop tasks and close its client; no-op if not running."""
+    """Cancel one cabinet's loop tasks and close its clients; no-op if not running."""
     entries = _running.pop(cabinet_id, None)
     client = _cabinet_clients.pop(cabinet_id, None)
-    if not entries and client is None:
+    stats_client = _cabinet_stats_clients.pop(cabinet_id, None)
+    if not entries and client is None and stats_client is None:
         return
     tasks = [task for task, _loop, _fp in entries or []]
     for task, loop, _fp in entries or []:
@@ -613,8 +633,9 @@ async def stop_for_cabinet(cabinet_id: int) -> None:
         task.cancel()
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
-    if client is not None:
-        await client.aclose()
+    for closing in (client, stats_client):
+        if closing is not None:
+            await closing.aclose()
     logger.info("collector: stopped cabinet %d (%d loops)", cabinet_id, len(entries or ()))
 
 

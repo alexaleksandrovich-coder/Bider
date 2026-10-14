@@ -5,9 +5,10 @@ reads cabinets through app.db.SessionLocal, so seeded cabinets must be
 COMMITTED (unlike the savepoint-isolated db_session fixture); _with_db runs
 session work on the shared session-scoped loop with a throwaway engine.
 
-Loops started by the supervisor call the WB client immediately; WbClient is
-monkeypatched with an offline fake so no network is touched. Every test stops
-the loops it started and deletes its cabinets (FK CASCADE cleans children).
+Loops started by the supervisor call the WB clients immediately; WbClient
+and StatisticsClient are monkeypatched with offline fakes so no network is
+touched. Every test stops the loops it started and deletes its cabinets (FK
+CASCADE cleans children).
 """
 
 import asyncio
@@ -85,6 +86,19 @@ class _OfflineWb:
         self.closed = True
 
 
+class _OfflineStatistics:
+    """StatisticsClient stand-in: orders() returns an empty page, no network."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        self.closed = False
+
+    async def orders(self, date_from) -> list[dict]:
+        return []
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
 async def _with_db(coro_fn):
     """Run `async def coro_fn(db)` on the current loop with a throwaway engine.
 
@@ -129,6 +143,7 @@ async def clean_supervisor(monkeypatch: pytest.MonkeyPatch):
     cabinets (FK CASCADE cleans collection_log / raw_responses children).
     """
     monkeypatch.setattr(runner, "WbClient", _OfflineWb)
+    monkeypatch.setattr(runner, "StatisticsClient", _OfflineStatistics)
     ids: list[int] = []
 
     for cabinet_id in list(runner._running):
@@ -203,19 +218,19 @@ async def _get_cabinet(cabinet_id: int) -> Cabinet:
 # --- start_for_cabinet / stop_for_cabinet ---------------------------------------
 
 
-async def test_start_for_cabinet_starts_seven_loops(schema, clean_supervisor):
+async def test_start_for_cabinet_starts_all_loops(schema, clean_supervisor):
     cid = await _seed_cabinet("sup-start")
     clean_supervisor.append(cid)
 
     loops = await runner.start_for_cabinet(await _get_cabinet(cid))
 
-    assert len(loops) == 7
+    assert len(loops) == 8
     assert {loop.name for loop in loops} == {
         "campaigns", "budgets", "balance", "fullstats",
-        "bids_min", "auction_snapshot", "clusters",
+        "bids_min", "auction_snapshot", "clusters", "orders",
     }
     entries = runner._running[cid]
-    assert len(entries) == 7
+    assert len(entries) == 8
     # every entry carries the same token fingerprint (sha256 of the ciphertext)
     fingerprint = runner._token_fingerprint((await _get_cabinet(cid)).token_encrypted)
     assert {fp for _, _, fp in entries} == {fingerprint}
@@ -242,7 +257,7 @@ async def test_tick_starts_loops_for_new_cabinet(schema, clean_supervisor):
 
     assert changes >= 1
     assert cid in runner._running
-    assert len(runner._running[cid]) == 7
+    assert len(runner._running[cid]) == 8
 
     # no changes since: a second tick is a no-op
     entries = list(runner._running[cid])
@@ -262,7 +277,7 @@ async def test_tick_restarts_cabinet_after_token_change(schema, clean_supervisor
 
     assert changes == 1
     entries = runner._running[cid]
-    assert len(entries) == 7
+    assert len(entries) == 8
     new_tasks = {task for task, _, _ in entries}
     assert new_tasks.isdisjoint(old_tasks)  # loops recreated, not reused
     assert all(not task.done() for task in new_tasks)

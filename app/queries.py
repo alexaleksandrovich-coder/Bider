@@ -26,6 +26,7 @@ from app.models import (
     Campaign,
     Cluster,
     CollectionLog,
+    Order,
     Position,
     Stat,
 )
@@ -419,6 +420,47 @@ async def items_summary(session: AsyncSession, cabinet_id: int) -> list[dict]:
     ]
     items.sort(key=lambda item: (-item["spent"], item["nm_id"]))
     return items
+
+
+async def hours_heatmap(session: AsyncSession, cabinet_id: int, days: int) -> list[dict]:
+    """Orders and revenue per MSK hour for the last `days` days.
+
+    The window is [today-days+1 .. today] by the Moscow calendar, same
+    semantics as overview's 7d/30d buckets. `hour` is the stored MSK hour of
+    the order (approximated by lastChangeDate at collection time); cancelled
+    orders are excluded from both counts and revenue. The result always
+    covers all 24 hours sorted 0..23 (zero hours included) so chart axes
+    never have gaps: [{hour, orders: int, revenue_kopecks: int}].
+    """
+    today = msk_today()
+    from_day = today - timedelta(days=days - 1)
+    by_hour: dict[int, tuple[int, int]] = {
+        row.hour: (int(row.orders), int(row.revenue))
+        for row in (
+            await session.execute(
+                select(
+                    Order.hour,
+                    func.count().label("orders"),
+                    func.coalesce(func.sum(Order.price_kopecks), 0).label("revenue"),
+                )
+                .where(
+                    Order.cabinet_id == cabinet_id,
+                    Order.is_cancelled.is_(False),
+                    Order.date >= from_day,
+                    Order.date <= today,
+                )
+                .group_by(Order.hour)
+            )
+        ).all()
+    }
+    return [
+        {
+            "hour": hour,
+            "orders": by_hour.get(hour, (0, 0))[0],
+            "revenue_kopecks": by_hour.get(hour, (0, 0))[1],
+        }
+        for hour in range(24)
+    ]
 
 
 async def health_status(session: AsyncSession) -> dict:

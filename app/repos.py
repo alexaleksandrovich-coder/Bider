@@ -22,6 +22,7 @@ from app.models import (
     Campaign,
     Cluster,
     CollectionLog,
+    Order,
     Position,
     Stat,
 )
@@ -234,6 +235,39 @@ async def upsert_clusters(
             "stats": stmt.excluded.stats,
             "bid_kopecks": stmt.excluded.bid_kopecks,
             "updated_at": func.now(),
+        },
+    )
+    result = await session.execute(stmt)
+    await session.commit()
+    return int(result.rowcount)
+
+
+async def upsert_orders(session: AsyncSession, cabinet_id: int, rows: list[dict]) -> int:
+    """Insert or update orders by srid (the PK); metrics refreshed on every pass.
+
+    Rows come from app.collector.orders.parse_orders (each already carries
+    cabinet_id). WB refines orders retroactively (cancellations, price
+    changes), so every non-key column is re-written on conflict. Duplicates
+    of one srid inside a single page are folded first (last one wins) —
+    PostgreSQL rejects ON CONFLICT DO UPDATE touching a row twice, and a
+    live page MAY repeat a srid (его состояние меняется внутри выгрузки).
+    """
+    if not rows:
+        return 0
+    unique: dict[str, dict] = {}
+    for row in rows:
+        unique[row["srid"]] = row  # last occurrence keeps the freshest state
+    values = [{"cabinet_id": cabinet_id, **row} for row in unique.values()]
+    stmt = pg_insert(Order).values(values)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["srid"],
+        set_={
+            "nm_id": stmt.excluded.nm_id,
+            "date": stmt.excluded.date,
+            "hour": stmt.excluded.hour,
+            "price_kopecks": stmt.excluded.price_kopecks,
+            "date_time": stmt.excluded.date_time,
+            "is_cancelled": stmt.excluded.is_cancelled,
         },
     )
     result = await session.execute(stmt)
