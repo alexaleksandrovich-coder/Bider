@@ -159,7 +159,7 @@ def test_parse_fullstats_fixture():
         "sum_kopecks": 80000,
         "sum_price_kopecks": 1000000,
         "canceled": 0,
-        "cpc_kopecks": 800,
+        "cpc_kopecks": 80000,  # 80000 // 1
     }
 
     assert len(position_rows) == 2
