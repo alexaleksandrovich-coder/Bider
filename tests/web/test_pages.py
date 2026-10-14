@@ -78,12 +78,15 @@ def cabinet_ids() -> list[int]:
 
 
 def test_overview_shows_cabinet_sums_balance_freshness(auth_client, cabinet_ids):
+    # now вычисляется В тесте, а не при импорте модуля: ассерты rel_time
+    # («2 мин назад») имеют узкое окно и ломались на долгих прогонах.
+    now = datetime.now(UTC)
     cabinet_ids.append(
         _seed(
             make_cabinet(name="T8 Alpha BY"),
             make_stat(None, 101, 1, msk_today(), sum_kopecks=123456),
-            make_balance(None, 500000, _T0 - timedelta(minutes=5)),
-            make_collection_log(None, finished_at=_T0 - timedelta(minutes=2)),
+            make_balance(None, 500000, now - timedelta(minutes=5)),
+            make_collection_log(None, finished_at=now - timedelta(minutes=2)),
         )
     )
     r = auth_client.get("/")
