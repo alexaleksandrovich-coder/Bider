@@ -252,6 +252,13 @@ def test_parsers_empty_payloads():
     assert parse_budget([]) == []
 
 
+def test_parsers_tolerate_json_null():
+    """Живой факт: WB отдаёт literal null вместо пустого списка за окно без данных."""
+    assert parse_adverts(None) == []
+    assert parse_fullstats(None) == ([], [])
+    assert parse_budget(None) == []
+
+
 def test_parse_adverts_live_wrapped_shape():
     """Живая форма (спайк 13.10.2026): {"adverts": [...]}, id/settings.name/
     settings.payment_type/timestamps.updated, type приходит из count (types)."""

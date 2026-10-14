@@ -88,6 +88,8 @@ def parse_adverts(
     """
     if isinstance(payload, Mapping):
         payload = get_any(payload, "adverts", "data", default=()) or ()
+    if not payload:  # WB returns literal null for "no data" — treat as empty
+        return []
     rows: list[dict] = []
     for camp in payload:
         if not isinstance(camp, Mapping):
@@ -165,7 +167,12 @@ def parse_fullstats(payload: list[dict]) -> tuple[list[dict], list[dict]]:
     agg: dict[tuple[Any, ...], dict] = {}
     positions: dict[tuple[Any, ...], dict] = {}
 
+    if not payload:  # WB returns literal null for "no data" — treat as empty
+        return [], []
+
     for camp in payload:
+        if not isinstance(camp, Mapping):
+            continue
         advert_id = _to_int(get_any(camp, "advertId", "advert_id"))
 
         for day in get_any(camp, "days", default=()):
@@ -240,6 +247,8 @@ def parse_budget(payload: Mapping[str, Any] | list[Any]) -> list[dict]:
     """
     if isinstance(payload, Mapping):
         payload = get_any(payload, "adverts", "data", default=()) or ()
+    if not payload:  # WB returns literal null for "no data" — treat as empty
+        return []
     rows: list[dict] = []
     for item in payload:
         if not isinstance(item, Mapping):
