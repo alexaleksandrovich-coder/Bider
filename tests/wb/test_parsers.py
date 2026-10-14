@@ -219,14 +219,30 @@ def test_parse_fullstats_tolerates_datetime_dates_and_missing_fields():
 
 
 def test_parse_budget_fixture():
+    # money is converted to kopecks (*100) — live fact 14.10.2026
     assert parse_budget(_load("budget_sample.json")) == [
-        {"advert_id": 1, "cash": 100000, "netting": 50000, "total": 150000}
+        {"advert_id": 1, "cash": 10000000, "netting": 5000000, "total": 15000000}
     ]
 
 
 def test_parse_budget_snake_case_and_missing_fields():
     assert parse_budget([{"advert_id": 9}]) == [
         {"advert_id": 9, "cash": 0, "netting": 0, "total": 0}
+    ]
+
+
+def test_parse_budget_live_wrapped_shape():
+    """Живая форма (спайк 14.10.2026): {"adverts": [{advertId, currency, total}]},
+    total в целых единицах валюты (33 = 33 BYN), cash/netting отсутствуют."""
+    payload = {
+        "adverts": [
+            {"advertId": 40908103, "currency": "BYN", "total": 33},
+            {"advertId": 40737767, "currency": "BYN", "total": 15},
+        ]
+    }
+    assert parse_budget(payload) == [
+        {"advert_id": 40908103, "cash": 0, "netting": 0, "total": 3300},
+        {"advert_id": 40737767, "cash": 0, "netting": 0, "total": 1500},
     ]
 
 

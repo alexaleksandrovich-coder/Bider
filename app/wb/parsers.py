@@ -230,20 +230,26 @@ def parse_fullstats(payload: list[dict]) -> tuple[list[dict], list[dict]]:
     return stat_rows, position_rows
 
 
-def parse_budget(payload: list[dict]) -> list[dict]:
+def parse_budget(payload: Mapping[str, Any] | list[Any]) -> list[dict]:
     """Parse POST /api/advert/v2/budget into rows {advert_id, cash, netting, total}.
 
-    Field names may be camelCase (payment-type dependent) — normalized via
-    get_any. Money values are kept as-is (int, assumed kopecks).
+    Живой факт (спайк 14.10.2026, BYN-кабинет): ответ обёрнут в {"adverts": [...]},
+    элемент — {advertId, currency, total}; cash/netting отсутствуют. total приходит
+    в ЦЕЛЫХ единицах валюты (33 = 33 BYN — сошлось с кабинетом продвижения),
+    здесь переводится в копейки (*100).
     """
+    if isinstance(payload, Mapping):
+        payload = get_any(payload, "adverts", "data", default=()) or ()
     rows: list[dict] = []
     for item in payload:
+        if not isinstance(item, Mapping):
+            continue
         rows.append(
             {
                 "advert_id": _to_int(get_any(item, "advertId", "advert_id")),
-                "cash": _to_int(get_any(item, "cash")),
-                "netting": _to_int(get_any(item, "netting")),
-                "total": _to_int(get_any(item, "total")),
+                "cash": _to_int(get_any(item, "cash")) * 100,
+                "netting": _to_int(get_any(item, "netting")) * 100,
+                "total": _to_int(get_any(item, "total")) * 100,
             }
         )
     return rows
