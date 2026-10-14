@@ -10,7 +10,6 @@ __pycache__
 logs
 backups
 .scratch
-scripts
 tests
 docs
 *.md
