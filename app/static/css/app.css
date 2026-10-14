@@ -261,3 +261,86 @@ canvas {
   border: 1px solid var(--border);
   border-radius: 8px;
 }
+
+/* controller action status badges (schedules page journal) */
+.act-ok {
+  color: #7bd88f;
+  border-color: #3d5a45;
+}
+
+.act-error {
+  color: var(--danger);
+  border-color: #6b3a36;
+}
+
+.act-dry {
+  color: #f2a33c;
+  border-color: #5a4a2e;
+}
+
+.act-skipped {
+  color: var(--muted);
+}
+
+/* schedules page: mode/kill-switch bar and per-campaign form */
+.ctrl-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.7rem;
+  margin: 0.6rem 0;
+}
+
+.ctrl-bar .inline {
+  display: inline;
+}
+
+.form-error {
+  color: var(--danger);
+}
+
+.form-ok {
+  color: #7bd88f;
+}
+
+.sched-form {
+  margin: 0.25rem 0;
+}
+
+.hours-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.15rem;
+}
+
+.hour-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  font-size: 0.72rem;
+  color: var(--muted);
+  min-width: 2.1rem;
+}
+
+.sched-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.7rem;
+  margin-top: 0.35rem;
+}
+
+.limit-input {
+  width: 11rem;
+  padding: 0.3rem 0.5rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+
+.enabled-label {
+  color: var(--text);
+  white-space: nowrap;
+}

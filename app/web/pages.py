@@ -7,6 +7,7 @@ templates stay logic-free. Tokens are only ever encrypted (encrypt_token) and
 never rendered back.
 """
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated
@@ -16,11 +17,22 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.collector.runner import LOOPS_SPEC, stop_for_cabinet, sync_cabinet_once
-from app.crypto import encrypt_token
-from app.models import Cabinet, CollectionLog, User
+from app.controller.generator import generate_hours
+from app.controller.runner import (
+    COVERAGE_PCT_KEY,
+    DEFAULT_COVERAGE_PCT,
+    DEFAULT_KILL_SWITCH,
+    DEFAULT_MODE,
+    KILL_SWITCH_KEY,
+    MODE_KEY,
+    MODE_LIVE,
+)
+from app.crypto import decrypt_token, encrypt_token
+from app.models import Cabinet, Campaign, CollectionLog, ControllerLog, Schedule, User
 from app.queries import (
     STATUS_FILTERS,
     cabinet_campaigns,
@@ -30,6 +42,10 @@ from app.queries import (
     items_summary,
     overview,
 )
+from app.repos import get_setting, set_setting
+from app.wb.client import WbClient
+from app.wb.errors import WbApiError
+from app.wb.limiter import LimiterRegistry
 from app.web.auth import get_db, require_user
 from app.web.format import drr, format_money, rel_time, status_name, type_name
 
@@ -450,4 +466,412 @@ async def health_page(request: Request, user: _UserDep, db: _DbDep):
             "cabinet_names": cabinet_names,
             "periods": periods,
         },
+    )
+
+
+# --- Task 6 (phase 2): schedules page -------------------------------------------
+#
+# Расписания показов: баннер режима (dry_run/live) + kill-switch, таблица РК
+# с чекбоксами часов и дневным лимитом, «Применить», «из данных» (генератор
+# часов из тепловой карты) и журнал контроллера (последние 100).
+#
+# ПРЕДОХРАНИТЕЛЬ (spec-phase2, Global Constraints): write-вызов WB
+# (daily_limits_put) выполняется ТОЛЬКО при controller_mode="live"; в
+# dry_run роут лишь пишет controller_log со status="dry".
+
+
+def _hours_mask(hours: list[int]) -> list[int]:
+    """Отсортированный список часов генератора -> маска 24x0/1."""
+    on = set(hours)
+    return [1 if hour in on else 0 for hour in range(24)]
+
+
+def _parse_hours(form) -> list[int] | None:
+    """Часы из формы: скрытый input `hours` с JSON-массивом ИЛИ чекбоксы
+    hour_0..hour_23. None — некорректный вход (не JSON, не 24 элемента,
+    значения не 0/1) -> роут вернёт 422."""
+    raw = str(form.get("hours", "")).strip()
+    if raw:
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            return None
+        if (
+            not isinstance(data, list)
+            or len(data) != 24
+            or not all(item in (0, 1) for item in data)
+        ):
+            return None
+        return data
+    return [1 if form.get(f"hour_{hour}") else 0 for hour in range(24)]
+
+
+def _parse_limit(raw: str) -> int | None | str:
+    """Дневной лимит из формы (в единицах валюты) -> копейки.
+
+    None — пустое поле (лимита нет); int — round(float * 100);
+    str — сообщение об ошибке (не число, отрицательное, бесконечность).
+    """
+    raw = raw.strip().replace(",", ".")
+    if not raw:
+        return None
+    try:
+        kopecks = round(float(raw) * 100)
+    except (ValueError, OverflowError):  # "abc", nan, inf
+        return "Дневной лимит: ожидается число в единицах валюты"
+    if kopecks < 0:
+        return "Дневной лимит не может быть отрицательным"
+    return kopecks
+
+
+def _limit_input_value(kopecks: int | None) -> str:
+    """Значение поля лимита: money-формат в единицах валюты ("1500.00")."""
+    return f"{kopecks / 100:.2f}" if kopecks is not None else ""
+
+
+async def _last_actions(db: AsyncSession, cabinet_id: int) -> dict[int, ControllerLog]:
+    """Последняя строка controller_log по каждой кампании кабинета."""
+    rn = (
+        func.row_number()
+        .over(
+            partition_by=ControllerLog.advert_id,
+            order_by=[ControllerLog.created_at.desc(), ControllerLog.id.desc()],
+        )
+        .label("rn")
+    )
+    ranked = select(
+        ControllerLog.advert_id,
+        ControllerLog.action,
+        ControllerLog.status,
+        ControllerLog.created_at,
+        rn,
+    ).subquery()
+    return {
+        row.advert_id: row
+        for row in await db.execute(
+            select(
+                ranked.c.advert_id,
+                ranked.c.action,
+                ranked.c.status,
+                ranked.c.created_at,
+            ).where(ranked.c.rn == 1)
+        )
+    }
+
+
+async def _schedules_context(db: AsyncSession, cabinet: Cabinet) -> dict:
+    """Данные страницы расписаний: настройки режима, РК + расписания, журнал."""
+    mode = await get_setting(db, MODE_KEY, DEFAULT_MODE)
+    kill_switch = await get_setting(db, KILL_SWITCH_KEY, DEFAULT_KILL_SWITCH)
+    campaigns = await cabinet_campaigns(db, cabinet.id)
+    schedules = {
+        schedule.advert_id: schedule
+        for schedule in (
+            await db.execute(select(Schedule).where(Schedule.cabinet_id == cabinet.id))
+        )
+        .scalars()
+        .all()
+    }
+    last_actions = await _last_actions(db, cabinet.id)
+    rows = []
+    for campaign in campaigns:
+        schedule = schedules.get(campaign["advert_id"])
+        rows.append(
+            {
+                "advert_id": campaign["advert_id"],
+                "name": campaign["name"],
+                "payment_type": campaign["payment_type"],
+                "status": campaign["status"],
+                "hours": schedule.hours if schedule is not None else [0] * 24,
+                "enabled": schedule.enabled if schedule is not None else False,
+                "limit_value": _limit_input_value(
+                    schedule.daily_limit_kopecks if schedule is not None else None
+                ),
+                "last_action": last_actions.get(campaign["advert_id"]),
+            }
+        )
+    log = (
+        (
+            await db.execute(
+                select(ControllerLog).order_by(ControllerLog.id.desc()).limit(100)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    cabinet_names = {
+        row.id: row.name for row in (await db.execute(select(Cabinet))).scalars().all()
+    }
+    return {
+        "mode": mode,
+        "kill_switch": kill_switch,
+        "rows": rows,
+        "log": list(log),
+        "cabinet_names": cabinet_names,
+    }
+
+
+async def _render_schedules(
+    request: Request,
+    user: User,
+    db: AsyncSession,
+    cabinet: Cabinet,
+    *,
+    error: str | None = None,
+    applied: str | None = None,
+    generated: int | None = None,
+    status_code: int = 200,
+):
+    """Render the schedules page (shared by GET and the 422 error paths)."""
+    context = await _schedules_context(db, cabinet)
+    return templates.TemplateResponse(
+        request,
+        "schedules.html",
+        {
+            "user": user,
+            "current": cabinet,
+            "error": error,
+            "applied": applied,
+            "generated": generated,
+            **context,
+        },
+        status_code=status_code,
+    )
+
+
+async def _controller_log(
+    db: AsyncSession,
+    cabinet_id: int,
+    advert_id: int | None,
+    action: str,
+    status: str,
+    detail: str | None,
+) -> None:
+    """Одна строка controller_log (свой commit — как controller.runner._log)."""
+    db.add(
+        ControllerLog(
+            cabinet_id=cabinet_id,
+            advert_id=advert_id,
+            action=action,
+            status=status,
+            detail=detail,
+        )
+    )
+    await db.commit()
+
+
+@router.get("/schedules")
+async def schedules_page(
+    request: Request,
+    user: _UserDep,
+    db: _DbDep,
+    cabinet: int | None = None,
+    applied: str | None = None,
+    generated: int | None = None,
+):
+    """Расписания показов: баннер режима, kill-switch, РК с часами и лимитами.
+
+    Без ?cabinet= показывается страница выбора кабинета (как на /hours);
+    неизвестный кабинет — 404.
+    """
+    cabinets = (
+        (await db.execute(select(Cabinet).where(Cabinet.active.is_(True)).order_by(Cabinet.id)))
+        .scalars()
+        .all()
+    )
+    if cabinet is None:
+        return templates.TemplateResponse(
+            request,
+            "schedules.html",
+            {"user": user, "cabinets": cabinets, "current": None},
+        )
+    current = await db.get(Cabinet, cabinet)
+    if current is None:
+        raise HTTPException(status_code=404, detail="Cabinet not found")
+    return await _render_schedules(
+        request, user, db, current, applied=applied, generated=generated
+    )
+
+
+@router.post("/schedules/generate")
+async def schedules_generate(request: Request, user: _UserDep, db: _DbDep, cabinet: int):
+    """«Из данных»: пересчитать часы по generate_hours(hours_heatmap(30), coverage_pct).
+
+    Расписания создаются/обновляются для ВСЕХ кампаний кабинета с
+    enabled=false — генерация только пре-заполняет часы, включение происходит
+    кнопкой «Применить». daily_limit_kopecks/applied_at существующих строк не
+    трогаются.
+    """
+    current = await db.get(Cabinet, cabinet)
+    if current is None:
+        raise HTTPException(status_code=404, detail="Cabinet not found")
+    heatmap = await hours_heatmap(db, cabinet, 30)
+    coverage = int(await get_setting(db, COVERAGE_PCT_KEY, DEFAULT_COVERAGE_PCT))
+    mask = _hours_mask(generate_hours(heatmap, coverage_pct=coverage))
+    advert_ids = (
+        (
+            await db.execute(
+                select(Campaign.advert_id).where(Campaign.cabinet_id == cabinet)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    generated_count = 0
+    if advert_ids:
+        values = [
+            {
+                "cabinet_id": cabinet,
+                "advert_id": advert_id,
+                "hours": mask,
+                "enabled": False,
+                "updated_at": func.now(),
+            }
+            for advert_id in advert_ids
+        ]
+        stmt = pg_insert(Schedule).values(values)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["cabinet_id", "advert_id"],
+            set_={
+                "hours": stmt.excluded.hours,
+                "enabled": stmt.excluded.enabled,
+                "updated_at": stmt.excluded.updated_at,
+            },
+        )
+        result = await db.execute(stmt)
+        await db.commit()
+        generated_count = int(result.rowcount)
+    return RedirectResponse(
+        f"/schedules?cabinet={cabinet}&generated={generated_count}", status_code=303
+    )
+
+
+@router.post("/schedules/killswitch")
+async def schedules_killswitch(
+    request: Request, user: _UserDep, db: _DbDep, cabinet: int | None = Form(None)
+):
+    """Кнопка «Стоп всё»/«Возобновить»: toggle controller_kill_switch."""
+    current = await get_setting(db, KILL_SWITCH_KEY, DEFAULT_KILL_SWITCH)
+    await set_setting(db, KILL_SWITCH_KEY, not current)
+    target = f"/schedules?cabinet={cabinet}" if cabinet is not None else "/schedules"
+    return RedirectResponse(target, status_code=303)
+
+
+@router.post("/schedules/mode")
+async def schedules_mode(
+    request: Request, user: _UserDep, db: _DbDep, cabinet: int | None = Form(None)
+):
+    """Toggle controller_mode dry_run <-> live.
+
+    На живом сервере перевод в live защищён onsubmit-подтверждением в UI;
+    отдельной парольной защиты нет — kill-switch и dry_run по умолчанию
+    достаточны как предохранители на MVP (решение владельца).
+    """
+    mode = await get_setting(db, MODE_KEY, DEFAULT_MODE)
+    await set_setting(db, MODE_KEY, DEFAULT_MODE if mode == MODE_LIVE else MODE_LIVE)
+    target = f"/schedules?cabinet={cabinet}" if cabinet is not None else "/schedules"
+    return RedirectResponse(target, status_code=303)
+
+
+@router.post("/schedules/{cabinet_id}/{advert_id}")
+async def schedules_apply(
+    request: Request, user: _UserDep, db: _DbDep, cabinet_id: int, advert_id: int
+):
+    """«Применить»: upsert расписания (часы, дневной лимит, enabled).
+
+    daily_limit приходит в единицах валюты строкой -> round(x*100) копеек;
+    некорректный вход («abc», «-5», плохой JSON часов) — 422 с перерисовкой
+    страницы и сообщением. Для cpc с лимитом в live дополнительно ставится
+    нативный дневной лимит WB (daily_limits_put, carry_over); в dry_run —
+    только controller_log(action="limit", status="dry") без write-вызова.
+    """
+    cabinet = await db.get(Cabinet, cabinet_id)
+    if cabinet is None:
+        raise HTTPException(status_code=404, detail="Cabinet not found")
+    campaign = await db.get(Campaign, (cabinet_id, advert_id))
+    if campaign is None:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    form = await request.form()
+
+    hours = _parse_hours(form)
+    if hours is None:
+        return await _render_schedules(
+            request,
+            user,
+            db,
+            cabinet,
+            error="Часы: ожидается JSON-массив из 24 значений 0/1 (или чекбоксы)",
+            status_code=422,
+        )
+    limit_kopecks = _parse_limit(str(form.get("daily_limit", "")))
+    if isinstance(limit_kopecks, str):
+        return await _render_schedules(
+            request, user, db, cabinet, error=limit_kopecks, status_code=422
+        )
+    enabled = form.get("enabled") is not None
+
+    stmt = pg_insert(Schedule).values(
+        cabinet_id=cabinet_id,
+        advert_id=advert_id,
+        hours=hours,
+        daily_limit_kopecks=limit_kopecks,
+        enabled=enabled,
+        updated_at=func.now(),
+        applied_at=func.now(),
+    )
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["cabinet_id", "advert_id"],
+        set_={
+            "hours": stmt.excluded.hours,
+            "daily_limit_kopecks": stmt.excluded.daily_limit_kopecks,
+            "enabled": stmt.excluded.enabled,
+            "updated_at": stmt.excluded.updated_at,
+            "applied_at": stmt.excluded.applied_at,
+        },
+    )
+    await db.execute(stmt)
+    await db.commit()
+
+    # Нативный дневной лимит (только cpc): write в WB — ИСКЛЮЧИТЕЛЬНО в live.
+    if enabled and limit_kopecks is not None and campaign.payment_type == "cpc":
+        mode = await get_setting(db, MODE_KEY, DEFAULT_MODE)
+        if mode == MODE_LIVE:
+            client = WbClient(
+                decrypt_token(cabinet.token_encrypted),
+                LimiterRegistry(),
+                cabinet_id=cabinet_id,
+            )
+            try:
+                await client.daily_limits_put(
+                    [advert_id],
+                    enabled=True,
+                    daily_limit_kopecks=limit_kopecks,
+                    carry_over=True,
+                )
+            except WbApiError as exc:
+                await _controller_log(db, cabinet_id, advert_id, "limit", "error", str(exc))
+            else:
+                await _controller_log(
+                    db,
+                    cabinet_id,
+                    advert_id,
+                    "limit",
+                    "ok",
+                    f"native daily limit {limit_kopecks} kopecks (carry over)",
+                )
+            finally:
+                await client.aclose()
+        else:
+            await _controller_log(
+                db,
+                cabinet_id,
+                advert_id,
+                "limit",
+                "dry",
+                f"would set native daily limit {limit_kopecks} kopecks",
+            )
+
+    return RedirectResponse(
+        f"/schedules?cabinet={cabinet_id}&applied={quote(campaign.name)}",
+        status_code=303,
     )

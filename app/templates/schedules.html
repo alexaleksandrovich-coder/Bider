@@ -1,0 +1,127 @@
+{% extends "base.html" %}
+{% block title %}Расписания — Bider{% endblock %}
+{% block content %}
+<h1>Расписания</h1>
+
+{% if current is none %}
+<p class="muted">Выберите кабинет:</p>
+<ul>
+  {% for c in cabinets %}
+  <li><a href="/schedules?cabinet={{ c.id }}">{{ c.name }}</a> <span class="badge">{{ c.wb_type }}</span></li>
+  {% endfor %}
+  {% if not cabinets %}<li>Нет активных кабинетов. Добавьте их на странице
+    <a href="/admin/cabinets">Кабинеты</a>.</li>{% endif %}
+</ul>
+{% else %}
+<p class="muted">
+  Кабинет: <a href="/cabinets/{{ current.id }}">{{ current.name }}</a>
+  · валюта {{ current.currency }} · <a href="/schedules">выбрать другой</a>
+</p>
+
+<div class="ctrl-bar">
+  {% if kill_switch %}
+  <span class="badge act-skipped">kill-switch: ВКЛ — контроллер остановлен</span>
+  {% else %}
+  <span class="badge">kill-switch: выключен</span>
+  {% endif %}
+  {% if mode == "live" %}
+  <span class="badge act-error">режим: live — действия применяются к кампаниям</span>
+  {% else %}
+  <span class="badge act-dry">режим: dry-run — действия только журналю</span>
+  {% endif %}
+  <form method="post" action="/schedules/killswitch" class="inline">
+    <input type="hidden" name="cabinet" value="{{ current.id }}">
+    <button type="submit">{% if kill_switch %}Возобновить{% else %}Стоп всё{% endif %}</button>
+  </form>
+  {% if mode == "live" %}
+  <form method="post" action="/schedules/mode" class="inline"
+        onsubmit="return confirm('Вернуть контроллер в dry-run?')">
+    <input type="hidden" name="cabinet" value="{{ current.id }}">
+    <button type="submit">В dry-run</button>
+  </form>
+  {% else %}
+  <form method="post" action="/schedules/mode" class="inline"
+        onsubmit="return confirm('Перевести контроллер в live? Действия будут применяться к кампаниям!')">
+    <input type="hidden" name="cabinet" value="{{ current.id }}">
+    <button type="submit">В live</button>
+  </form>
+  {% endif %}
+</div>
+
+{% if error %}<p class="form-error">{{ error }}</p>{% endif %}
+{% if applied %}<p class="form-ok">Расписание применено: {{ applied }}</p>{% endif %}
+{% if generated is not none %}<p class="form-ok">Сгенерированы часы для {{ generated }} кампаний
+  (расписания выключены — проверьте и нажмите «Применить»).</p>{% endif %}
+
+<form method="post" action="/schedules/generate?cabinet={{ current.id }}" class="inline">
+  <button type="submit">из данных</button>
+  <span class="muted">— пре-заполнить часы из заказов за 30 дней (расписания останутся выключенными)</span>
+</form>
+
+<table>
+  <thead>
+    <tr>
+      <th>РК</th><th>Тип оплаты</th><th>Статус</th>
+      <th>Часы (МСК, 0–23)</th><th>Дневной лимит</th><th>Вкл</th><th>Последнее действие</th><th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in rows %}
+    <tr>
+      <td>{{ row.name }} <span class="muted num">{{ row.advert_id }}</span></td>
+      <td><span class="badge">{{ row.payment_type }}</span></td>
+      <td>{{ status_name(row.status) }}</td>
+      <td colspan="3">
+        <form method="post" action="/schedules/{{ current.id }}/{{ row.advert_id }}" class="sched-form">
+          <div class="hours-grid">
+            {% for hour in range(24) %}
+            <label class="hour-cell">{{ "%02d" | format(hour) }}
+              <input type="checkbox" name="hour_{{ hour }}" value="1"{% if row.hours[hour] %} checked{% endif %}>
+            </label>
+            {% endfor %}
+          </div>
+          <div class="sched-controls">
+            <input type="text" name="daily_limit" value="{{ row.limit_value }}"
+                   placeholder="лимит в день, {{ current.currency }}" class="limit-input"
+                   inputmode="decimal">
+            <label class="enabled-label">
+              <input type="checkbox" name="enabled" value="1"{% if row.enabled %} checked{% endif %}> вкл
+            </label>
+            <button type="submit">Применить</button>
+          </div>
+        </form>
+      </td>
+      <td>
+        {% if row.last_action %}
+        <span class="badge act-{{ row.last_action.status }}">{{ row.last_action.action }}</span>
+        <span class="muted">{{ rel_time(row.last_action.created_at) }}</span>
+        {% else %}—{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+    {% if not rows %}<tr><td colspan="7">Кампаний нет — запустите сбор на странице
+      <a href="/cabinets/{{ current.id }}">Кабинет</a>.</td></tr>{% endif %}
+  </tbody>
+</table>
+
+<h2>Журнал контроллера (последние 100)</h2>
+<table>
+  <thead>
+    <tr><th>Время</th><th>Кабинет</th><th>РК</th><th>Действие</th><th>Статус</th><th>Детали</th></tr>
+  </thead>
+  <tbody>
+    {% for entry in log %}
+    <tr>
+      <td class="num">{% if entry.created_at %}{{ entry.created_at.strftime("%d.%m %H:%M:%S") }}{% else %}—{% endif %}</td>
+      <td>{% if entry.cabinet_id is not none %}{{ cabinet_names.get(entry.cabinet_id, entry.cabinet_id) }}{% else %}—{% endif %}</td>
+      <td class="num">{% if entry.advert_id is not none %}{{ entry.advert_id }}{% else %}—{% endif %}</td>
+      <td>{{ entry.action }}</td>
+      <td><span class="badge act-{{ entry.status }}">{{ entry.status }}</span></td>
+      <td class="muted">{{ (entry.detail or "")[:200] or "—" }}</td>
+    </tr>
+    {% endfor %}
+    {% if not log %}<tr><td colspan="6">Журнал пуст.</td></tr>{% endif %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}
